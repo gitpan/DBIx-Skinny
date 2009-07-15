@@ -1,11 +1,6 @@
-use strict;
-use warnings;
-use utf8;
-use Test::Declare;
-use YAML;
-
-use lib './t';
+use t::Utils;
 use Mock::Basic;
+use Test::Declare;
 
 plan tests => blocks;
 
@@ -33,13 +28,6 @@ describe 'count test' => run {
 
     test 'iterator count' => run {
         is +Mock::Basic->search('mock_basic',{  })->count, 2;
-    };
-
-    cleanup {
-        if ( $ENV{SKINNY_PROFILE} ) {
-            warn "query log";
-            warn YAML::Dump(Mock::Basic->profiler->query_log);
-        }
     };
 };
 

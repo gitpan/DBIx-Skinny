@@ -29,4 +29,5 @@ requires:
   UNIVERSAL::require: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.01
+  repository: git://github.com/nekokak/p5-dbix-skinny.git
+version: 0.02

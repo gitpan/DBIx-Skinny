@@ -1,11 +1,6 @@
-use strict;
-use warnings;
-use utf8;
-use Test::Declare;
-use YAML;
-
-use lib './t';
+use t::Utils;
 use Mock::Basic;
+use Test::Declare;
 
 plan tests => blocks;
 
@@ -37,13 +32,6 @@ describe 'delete test' => run {
         my $row = Mock::Basic->single('mock_basic',{id => 1})->delete;
 
         is +Mock::Basic->count('mock_basic', 'id'), 0;
-    };
-
-    cleanup {
-        if ( $ENV{SKINNY_PROFILE} ) {
-            warn "query log";
-            warn YAML::Dump(Mock::Basic->profiler->query_log);
-        }
     };
 };
 

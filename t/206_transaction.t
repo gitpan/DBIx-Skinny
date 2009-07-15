@@ -2,15 +2,17 @@ use strict;
 use warnings;
 use utf8;
 use Test::Declare;
-use YAML;
-
 use lib './t';
 use Mock::BasicMySQL;
+
+my ($dsn, $username, $password) = @ENV{map { "SKINNY_MYSQL_${_}" } qw/DSN USER PASS/};
+plan skip_all => 'Set $ENV{SKINNY_MYSQL_DSN}, _USER and _PASS to run this test' unless ($dsn && $username);
 
 plan tests => blocks;
 
 describe 'transaction test' => run {
     init {
+        Mock::BasicMySQL->connect({dsn => $dsn, username => $username, password => $password});
         Mock::BasicMySQL->setup_test_db;
     };
 
@@ -90,10 +92,6 @@ describe 'transaction test' => run {
 
     cleanup {
         Mock::BasicMySQL->cleanup_test_db;
-        if ( $ENV{SKINNY_PROFILE} ) {
-            warn "query log";
-            warn YAML::Dump(Mock::BasicMySQL->profiler->query_log);
-        }
     };
 };
 
