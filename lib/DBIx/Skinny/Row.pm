@@ -60,10 +60,10 @@ sub get_columns {
 }
 
 sub set {
-    my ($self, %args) = @_;
+    my ($self, $args) = @_;
 
-    for my $col (keys %args) {
-        $self->{row_data}->{$col} = $args{$col};
+    for my $col (keys %$args) {
+        $self->{row_data}->{$col} = $args->{$col};
         delete $self->{_get_column_cached}->{$col};
         $self->{_dirty_columns}->{$col} = 1;
     }
@@ -86,6 +86,7 @@ sub update {
     $table ||= $self->{opt_table_info};
     $args ||= $self->get_dirty_columns;
     my $where = $self->_update_or_delete_cond($table);
+    $self->set($args);
     $self->{skinny}->update($table, $args, $where);
 }
 
@@ -144,9 +145,9 @@ Does C<get_column>, for all column values.
 
 =head2 set
 
-    $row->set($col => $val);
+    $row->set({$col => $val});
 
-set column data.
+set columns data.
 
 =head2 get_dirty_columns
 

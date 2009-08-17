@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -13,12 +13,13 @@ use DBIx::Skinny::Profiler;
 use DBIx::Skinny::Transaction;
 use Digest::SHA1;
 use Carp ();
+use Storable;
 
 sub import {
     my ($class, %opt) = @_;
 
     my $caller = caller;
-    my $args   = $opt{setup};
+    my $args   = $opt{setup}||+{};
 
     my $schema = "$caller\::Schema";
     eval "use $schema"; ## no critic
@@ -42,9 +43,10 @@ sub import {
 
     {
         no strict 'refs';
-        *{"$caller\::attribute"} = sub { $_attribute };
+        *{"$caller\::attribute"} = sub { ref $_[0] ? $_[0] : $_attribute };
 
         my @functions = qw/
+            new
             schema profiler
             dbh dbd connect connect_info _dbd_type reconnect
             call_schema_trigger
@@ -63,6 +65,27 @@ sub import {
 
     strict->import;
     warnings->import;
+}
+
+sub new {
+    my ($class, $connection_info) = @_;
+    my $attr = $class->attribute;
+
+    my $dbd      = delete $attr->{dbd};
+    my $profiler = delete $attr->{profiler};
+    my $dbh      = delete $attr->{dbh};
+
+    my $self = bless Storable::dclone($attr), $class;
+    if ($connection_info) {
+        $self->connect_info($connection_info);
+        $self->reconnect;
+    } else {
+        $self->attribute->{dbd}      = $dbd;
+        $self->attribute->{dbh}      = $dbh;
+    }
+    $self->attribute->{profiler} = $profiler;
+
+    return $self;
 }
 
 sub schema { shift->attribute->{schema} }
@@ -142,8 +165,20 @@ sub reconnect {
     $class->connect(@_);
 }
 
+sub set_dbh {
+    my ($class, $dbh) = @_;
+    $class->attribute->{dbh} = $dbh;
+}
 sub dbd { shift->attribute->{dbd} }
-sub dbh { shift->connect }
+sub dbh {
+    my $class = shift;
+
+    my $dbh = $class->connect;
+    unless ($dbh && $dbh->FETCH('Active') && $dbh->ping) {
+        $dbh = $class->reconnect;
+    }
+    $dbh;
+}
 
 sub _dbd_type {
     my $args = shift;
@@ -210,9 +245,16 @@ sub search {
     $rs->offset( $opt->{offset} ) if $opt->{offset};
 
     if (my $terms = $opt->{order_by}) {
+        $terms = [$terms] unless ref($terms) eq 'ARRAY';
         my @orders;
         for my $term (@{$terms}) {
-            my ($col, $case) = each %$term;
+            my ($col, $case);
+            if (ref($term) eq 'HASH') {
+                ($col, $case) = each %$term;
+            } else {
+                $col  = $term;
+                $case = 'ASC';
+            }
             push @orders, { column => $col, desc => $case };
         }
         $rs->order(\@orders);
@@ -355,6 +397,8 @@ sub insert {
     my $sth = $class->_execute($sql, \@bind);
 
     my $id = $class->attribute->{dbd}->last_insert_id($class->dbh, $sth);
+    $class->_close_sth($sth);
+
     my $obj = $class->search($table, { $schema->schema_info->{$table}->{pk} => $id } )->first;
 
     $class->call_schema_trigger('post_insert', $schema, $table, $obj);
@@ -400,6 +444,7 @@ sub update {
     my $sth = $class->dbh->prepare($sql);
     my $rows = $sth->execute(@bind);
 
+    $class->_close_sth($sth);
     $class->call_schema_trigger('post_update', $schema, $table, $rows);
 
     return $rows;
@@ -421,9 +466,13 @@ sub delete {
 
     my $sql = "DELETE " . $stmt->as_sql;
     $class->profiler($sql, $stmt->bind);
-    $class->_execute($sql, $stmt->bind);
+    my $sth = $class->_execute($sql, $stmt->bind);
 
     $class->call_schema_trigger('post_delete', $schema, $table);
+
+    my $ret = $sth->rows;
+    $class->_close_sth($sth);
+    $ret;
 }
 
 *find_or_insert = \*find_or_create;
@@ -469,7 +518,7 @@ sub _stack_trace {
     Carp::croak sprintf <<"TRACE", $reason, $stmt, Data::Dumper::Dumper($bind);
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 @@@@@ DBIx::Skinny 's Exception @@@@@
-Reasone : %s
+Reason  : %s
 SQL     : %s
 BIND    : %s
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
@@ -492,11 +541,11 @@ DBIx::Skinny - simple DBI wrapper/ORMapper
 =head1 SYNOPSIS
 
     package Your::Model;
-    use DBIx::Skinny setup => +{
+    use DBIx::Skinny setup => {
         dsn => 'dbi:SQLite:',
         username => '',
         password => '',
-    }
+    };
     1;
     
     package Your::Model::Schema;
@@ -706,6 +755,14 @@ No bugs have been reported.
 =head1 AUTHOR
 
 Atsushi Kobayashi  C<< <nekokak __at__ gmail.com> >>
+
+=head1 CONTRIBUTORS
+
+walf443 : Keiji Yoshimi
+
+TBONE : Terrence Brannon
+
+nekoya : Ryo Miyake
 
 =head1 REPOSITORY
 
