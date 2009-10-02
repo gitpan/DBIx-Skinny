@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use base 'Exporter';
 
-our $VERSION = '0.02';
+our $VERSION = '0.04';
 
 my @test_more_exports;
 my @test_more_method;
@@ -26,18 +26,25 @@ BEGIN {
 
 use Test::More import => \@test_more_exports;
 use Test::Exception;
+use Test::Warn;
+use Test::Output;
 use Test::Deep;
 
-my @test_wrappe_method = qw(
-    is_deeply_array cmp_ok ok dies_ok throws_ok
+my @test_wrapper_method = qw(
+    cmp_ok ok dies_ok throws_ok
     is isnt is_deeply like unlike
-    isa_ok cmp_deeply re
+    isa_ok cmp_deeply re cmp_bag
     prints_ok stderr_ok
+    warning_like warnings_like warning_is warnings_are
+    stdout_is stdout_isnt stdout_like stdout_unlike
+    stderr_is stderr_isnt stderr_like stderr_unlike
+    combined_is combined_isnt combined_like combined_unlike
+    output_is output_isnt output_like output_unlike
 );
 
-my @test_method = (@test_wrappe_method, @test_more_method);
+my @test_method = (@test_wrapper_method, @test_more_method);
 
-our @EXPORT = (@test_more_exports, @test_wrappe_method, qw/
+our @EXPORT = (@test_more_exports, @test_wrapper_method, qw/
     init cleanup run test describe blocks
 /);
 
@@ -50,16 +57,16 @@ sub test ($$) { ## no critic
 {
     no strict 'refs'; ## no critic
     for my $sub (qw/init cleanup/) {
-        *{"Test\::Declare\::$sub"} = sub (&) {
-            shift->();
+        *{"Test::Declare::${sub}"} = sub (&) {
+            goto $_[0];
         };
     }
 }
 
-sub run (&) { shift } ## no critic
+sub run (&) { $_[0] } ## no critic
 
 sub describe ($$) { ## no critic
-    shift; shift->();
+    goto $_[1];
 }
 
 use PPI;
@@ -85,49 +92,22 @@ sub blocks {
 {
     no strict 'refs'; ## no critic
     for my $sub (qw/is is_deeply like isa_ok isnt unlike/) {
-        *{"Test\::Declare\::$sub"} = sub ($$;$) {
-            my ($actual, $expected, $name) = @_;
-            my $test_more_code = "Test\::More"->can($sub);
-            goto $test_more_code, $actual, $expected, $name||$test_block_name;
+        *{"Test::Declare::${sub}"} = sub ($$;$) {
+            push @_, $test_block_name if @_ == 2;
+            goto \&{"Test::More::${sub}"};
         }
     }
 
 }
 
 sub cmp_ok ($$$;$) { ## no critic
-    my ($actual, $operator, $expected, $name) = @_;
-    my $test_more_code = "Test\::More"->can('cmp_ok');
-    goto $test_more_code, $actual, $operator, $expected, $name||$test_block_name;
+    push @_, $test_block_name if @_ == 3;
+    goto \&Test::More::cmp_ok;
 }
 
 sub ok ($;$) { ## no critic
-    my ($test, $name) = @_;
-    my $test_more_code = "Test\::More"->can('ok');
-    goto $test_more_code, $test, $name||$test_block_name;
-}
-
-## original method
-sub is_deeply_array ($$;$) { ## no critic
-    my ($actual, $expected, $name) = @_;
-    is_deeply( [sort { $a cmp $b } @{$actual}], [sort { $a cmp $b } @{$expected}], $name);
-}
-
-use IO::Scalar;
-sub prints_ok (&$;$) { ## no critic
-    my ($code, $expected, $name) = @_;
-
-    tie *STDOUT, 'IO::Scalar', \my $stdout;
-        $code->();
-        like($stdout, qr/$expected/, $name||$test_block_name);
-    untie *STDOUT;
-}
-sub stderr_ok (&$;$) { ## no critic
-    my ($code, $expected, $name) = @_;
-
-    tie *STDERR, 'IO::Scalar', \my $stderr;
-        $code->();
-        like($stderr, qr/$expected/, $name||$test_block_name);
-    untie *STDERR;
+    push @_, $test_block_name if @_ == 1;
+    goto \&Test::More::ok;
 }
 
 1;

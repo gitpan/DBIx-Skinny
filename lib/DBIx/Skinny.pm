@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -23,7 +23,11 @@ sub import {
 
     my $schema = "$caller\::Schema";
     eval "use $schema"; ## no critic
-    die $@ if $@;
+    if ( $@ ) {
+        # accept schema class declaration within base class.
+        eval "$schema->import"; ## no critic
+        die $@ if $@;
+    }
 
     my $dbd_type = _dbd_type($args);
     my $_attribute = +{
@@ -74,14 +78,16 @@ sub new {
     my $dbd      = delete $attr->{dbd};
     my $profiler = delete $attr->{profiler};
     my $dbh      = delete $attr->{dbh};
+    my $connect_options = delete $attr->{connect_options};
 
     my $self = bless Storable::dclone($attr), $class;
     if ($connection_info) {
         $self->connect_info($connection_info);
         $self->reconnect;
     } else {
-        $self->attribute->{dbd}      = $dbd;
-        $self->attribute->{dbh}      = $dbh;
+        $self->attribute->{dbd} = $dbd;
+        $self->attribute->{dbh} = $dbh;
+        $self->attribute->{connect_options} = $connect_options;
     }
     $self->attribute->{profiler} = $profiler;
 
@@ -396,7 +402,10 @@ sub insert {
     $class->profiler($sql, \@bind);
     my $sth = $class->_execute($sql, \@bind);
 
-    my $id = $class->attribute->{dbd}->last_insert_id($class->dbh, $sth);
+    my $pk = $class->schema->schema_info->{$table}->{pk};
+    my $id = defined $args->{$pk}
+        ? $args->{$pk}
+        : $class->attribute->{dbd}->last_insert_id($class->dbh, $sth, { table => $table });
     $class->_close_sth($sth);
 
     my $obj = $class->search($table, { $schema->schema_info->{$table}->{pk} => $id } )->first;
@@ -571,7 +580,7 @@ DBIx::Skinny - simple DBI wrapper/ORMapper
     );
     $row->update({name => 'nekokak'});
 
-    $row = Your::Model->search_by_sql(q{SELECT id, name FROM user WHERE id = ?},1);
+    $row = Your::Model->search_by_sql(q{SELECT id, name FROM user WHERE id = ?}, [ 1 ]);
     $row->delete('user')
 
 =head1 DESCRIPTION
@@ -579,6 +588,12 @@ DBIx::Skinny - simple DBI wrapper/ORMapper
 DBIx::Skinny is simple DBI wrapper and simple O/R Mapper.
 
 =head1 METHOD
+
+=head2 new
+
+create your skinny instance.
+
+It is possible to use it even by the class method.
 
 =head2 insert
 
@@ -664,8 +679,10 @@ get one record
 result set case:
 
     my $rs = Your::Model->resultset(
-        select => [qw/id name/],
-        from   => [qw/user/],
+        {
+            select => [qw/id name/],
+            from   => [qw/user/],
+        }
     );
     $rs->add_where('name' => {op => 'like', value => "%neko%"});
     $rs->limit(10);
@@ -677,7 +694,7 @@ result set case:
 
 get simple count
 
-    my $cnt = Your::Model->count('user',{count => 'id'});
+    my $cnt = Your::Model->count('user', 'id');
 
 =head2 search_named
 
@@ -696,7 +713,7 @@ execute your SQL
             user
         WHERE
             id = ?
-    },1);
+    },[ 1 ]);
 
 =head2 txn_scope
 
@@ -728,7 +745,7 @@ get transaction scope object.
     my $row = $itr->first;
     $row->insert; # inser data.
 
-=head find_or_new
+=head2 find_or_new
 
     my $row = Your::Model->find_or_new('user',{name => 'nekokak'});
 
@@ -763,6 +780,10 @@ walf443 : Keiji Yoshimi
 TBONE : Terrence Brannon
 
 nekoya : Ryo Miyake
+
+oinume: Kazuhiro Oinuma
+
+fujiwara: Shunichiro Fujiwara
 
 =head1 REPOSITORY
 
