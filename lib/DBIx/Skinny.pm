@@ -2,12 +2,11 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 use DBI;
 use DBIx::Skinny::Iterator;
 use DBIx::Skinny::DBD;
-use DBIx::Skinny::SQL;
 use DBIx::Skinny::Row;
 use DBIx::Skinny::Profiler;
 use DBIx::Skinny::Transaction;
@@ -22,12 +21,6 @@ sub import {
     my $args   = $opt{setup}||+{};
 
     my $schema = "$caller\::Schema";
-    eval "use $schema"; ## no critic
-    if ( $@ ) {
-        # accept schema class declaration within base class.
-        eval "$schema->import"; ## no critic
-        die $@ if $@;
-    }
 
     my $dbd_type = _dbd_type($args);
     my $_attribute = +{
@@ -52,12 +45,13 @@ sub import {
         my @functions = qw/
             new
             schema profiler
-            dbh dbd connect connect_info _dbd_type reconnect
+            dbh dbd connect connect_info _dbd_type reconnect set_dbh setup_dbd
             call_schema_trigger
             do resultset search single search_by_sql search_named count
             data2itr find_or_new
-                _get_sth_iterator _mk_row_class _camelize _mk_anon_row_class
+                _get_sth_iterator _mk_row_class _camelize _mk_anon_row_class _guess_table_name
             insert bulk_insert create update delete find_or_create find_or_insert
+            update_by_sql delete_by_sql
                 _add_where
             _execute _close_sth _stack_trace
             txn_scope txn_begin txn_rollback txn_commit txn_end
@@ -65,6 +59,13 @@ sub import {
         for my $func (@functions) {
             *{"$caller\::$func"} = \&$func;
         }
+    }
+
+    eval "use $schema"; ## no critic
+    if ( $@ ) {
+        # accept schema class declaration within base class.
+        (my $schema_file = $schema) =~ s|::|/|g;
+        die $@ if $@ && $@ !~ /Can't locate $schema_file\.pm in \@INC/;
     }
 
     strict->import;
@@ -90,6 +91,9 @@ sub new {
         $self->attribute->{connect_options} = $connect_options;
     }
     $self->attribute->{profiler} = $profiler;
+    $attr->{dbd}      = $dbd;
+    $attr->{dbh}      = $dbh;
+    $attr->{profiler} = $profiler;
 
     return $self;
 }
@@ -146,8 +150,7 @@ sub connect_info {
     $attr->{password} = $connect_info->{password};
     $attr->{connect_options} = $connect_info->{connect_options};
 
-    my $dbd_type = _dbd_type($connect_info);
-    $attr->{dbd} = DBIx::Skinny::DBD->new($dbd_type);
+    $class->setup_dbd($connect_info);
 }
 
 sub connect {
@@ -174,7 +177,15 @@ sub reconnect {
 sub set_dbh {
     my ($class, $dbh) = @_;
     $class->attribute->{dbh} = $dbh;
+    $class->setup_dbd({dbh => $dbh});
 }
+
+sub setup_dbd {
+    my ($class, $args) = @_;
+    my $dbd_type = _dbd_type($args);
+    $class->attribute->{dbd} = DBIx::Skinny::DBD->new($dbd_type);
+}
+
 sub dbd { shift->attribute->{dbd} }
 sub dbh {
     my $class = shift;
@@ -229,7 +240,9 @@ sub count {
 sub resultset {
     my ($class, $args) = @_;
     $args->{skinny} = $class;
-    DBIx::Skinny::SQL->new($args);
+
+    my $query_builder_class = $class->dbd->query_builder_class;
+    $query_builder_class->new($args);
 }
 
 sub search {
@@ -346,11 +359,21 @@ sub _mk_anon_row_class {
     return $row_class;
 }
 
+sub _guess_table_name {
+    my ($class, $sql) = @_;
+
+    if ($sql =~ /^.+from\s+([\w]+)\s/i) {
+        return $1;
+    }
+    return;
+}
+
 sub _mk_row_class {
     my ($class, $key, $table) = @_;
 
+    $table ||= $class->_guess_table_name($key)||'';
     my $attr = $class->attribute;
-    my $base_row_class = $attr->{row_class_map}->{$table||''}||'';
+    my $base_row_class = $attr->{row_class_map}->{$table}||'';
 
     if ( $base_row_class eq 'DBIx::Skinny::Row' ) {
         return $class->_mk_anon_row_class($key, $base_row_class);
@@ -376,6 +399,14 @@ sub _camelize {
     join('', map{ ucfirst $_ } split(/(?<=[A-Za-z])_(?=[A-Za-z])|\b/, $s));
 }
 
+sub _quote {
+    my ($label, $quote, $name_sep) = @_;
+
+    return $label if $label eq '*';
+    return $quote . $label . $quote if !defined $name_sep;
+    return join $name_sep, map { $quote . $_ . $quote } split /\Q$name_sep\E/, $label;
+}
+
 *create = \*insert;
 sub insert {
     my ($class, $table, $args) = @_;
@@ -394,9 +425,12 @@ sub insert {
         push @bind, $schema->utf8_off($col, $args->{$col});
     }
 
+    my $dbd = $class->dbd;
     # TODO: INSERT or REPLACE. bind_param_attributes etc...
+    my $quote = $dbd->quote;
+    my $name_sep = $dbd->name_sep;
     my $sql = "INSERT INTO $table\n";
-    $sql .= '(' . join(', ', @cols) . ')' . "\n" .
+    $sql .= '(' . join(', ', map {_quote($_, $quote, $name_sep)} @cols) . ')' . "\n" .
             'VALUES (' . join(', ', ('?') x @cols) . ')' . "\n";
 
     $class->profiler($sql, \@bind);
@@ -405,10 +439,19 @@ sub insert {
     my $pk = $class->schema->schema_info->{$table}->{pk};
     my $id = defined $args->{$pk}
         ? $args->{$pk}
-        : $class->attribute->{dbd}->last_insert_id($class->dbh, $sth, { table => $table });
+        : $dbd->last_insert_id($class->dbh, $sth, { table => $table });
     $class->_close_sth($sth);
 
-    my $obj = $class->search($table, { $schema->schema_info->{$table}->{pk} => $id } )->first;
+    $args->{$pk} = $id;
+    my $row_class = $class->_mk_row_class($sql, $table);
+    my $obj = $row_class->new(
+        {
+            row_data       => $args,
+            skinny         => $class,
+            opt_table_info => $table,
+        }
+    );
+    $obj->setup;
 
     $class->call_schema_trigger('post_insert', $schema, $table, $obj);
 
@@ -429,17 +472,21 @@ sub update {
     $class->call_schema_trigger('pre_update', $schema, $table, $args);
 
     # deflate
+    my $values = {};
     for my $col (keys %{$args}) {
-        $args->{$col} = $schema->call_deflate($col, $args->{$col});
+        $values->{$col} = $schema->call_deflate($col, $args->{$col});
     }
 
+    my $quote = $class->dbd->quote;
+    my $name_sep = $class->dbd->name_sep;
     my (@set,@bind);
     for my $col (keys %{ $args }) {
-        if (ref($args->{$col}) eq 'SCALAR') {
-            push @set, "$col = " . ${ $args->{$col} };
+        my $quoted_col = _quote($col, $quote, $name_sep);
+        if (ref($values->{$col}) eq 'SCALAR') {
+            push @set, "$quoted_col = " . ${ $values->{$col} };
         } else {
-            push @set, "$col = ?";
-            push @bind, $schema->utf8_off($col, $args->{$col});
+            push @set, "$quoted_col = ?";
+            push @bind, $schema->utf8_off($col, $values->{$col});
         }
     }
 
@@ -457,6 +504,17 @@ sub update {
     $class->call_schema_trigger('post_update', $schema, $table, $rows);
 
     return $rows;
+}
+
+sub update_by_sql {
+    my ($class, $sql, $bind) = @_;
+
+    $class->profiler($sql, $bind);
+    my $sth = $class->dbh->prepare($sql);
+    my $rows = $sth->execute(@$bind);
+    $class->_close_sth($sth);
+
+    $rows;
 }
 
 sub delete {
@@ -481,6 +539,17 @@ sub delete {
 
     my $ret = $sth->rows;
     $class->_close_sth($sth);
+    $ret;
+}
+
+sub delete_by_sql {
+    my ($class, $sql, $bind) = @_;
+
+    $class->profiler($sql, $bind);
+    my $sth = $class->dbh->prepare($sql);
+    my $ret = $sth->execute(@$bind);
+    $class->_close_sth($sth);
+
     $ret;
 }
 
@@ -595,18 +664,60 @@ create your skinny instance.
 
 It is possible to use it even by the class method.
 
+my $db = Your::Model->new($connection_info);
+
+$connection_info is optional argment.
+
+When $connection_info is specified,
+new method connect new DB connection from $connection_info.
+
+When $connection_info is not specified,
+it becomes use already setup connection or it doesn't do at all.
+
+example:
+
+    my $db = Your::Model->new;
+
+or
+
+    # connect new database connection.
+    my $db = Your::Model->new(+{
+        dsn      => $dsn,
+        username => $username,
+        password => $password,
+        connect_options => $connect_options,
+    });
+
 =head2 insert
 
-insert record
+insert new record and get inserted row object.
+
+my $row = Your::Model->insert($table, \%row_data);
+
+return object is a DBIx::Skinny::Row's object.
+
+example:
 
     my $row = Your::Model->insert('user',{
         id   => 1,
         name => 'nekokak',
     });
 
+or
+
+    my $db = Your::Model->new;
+    my $row = $db->insert('user',{
+        id   => 1,
+        name => 'nekokak',
+    });
+
 =head2 bulk_insert
 
-insert many record
+insert many record.
+
+Your::Model->bulk_insert($table, \@rows);
+
+example:
 
     Your::Model->bulk_insert('user',[
         {
@@ -629,23 +740,57 @@ insert method alias.
 
 =head2 update
 
-update record
+update record. return update row count.
 
-    Your::Model->update('user',{
+my $cnt = Your::Model->update($table, \%update_column);
+
+example:
+
+    my $update_row_count = Your::Model->update('user',{
         name => 'nomaneko',
     },{ id => 1 });
 
+=head2 update_by_sql
+
+update record by specific sql. return update row count.
+
+example:
+    my $update_row_count = Your::Model->update_by_sql(
+        q{UPDATE user SET name = ?},
+        'nomaneko'
+    );
+
 =head2 delete
 
-delete record
+delete record. return delete row count.
 
-    Your::Model->delete('user',{
+my $cnt = Your::Model->delete($table, \%delete_where_condition);
+
+example:
+    my $delete_row_count = Your::Model->delete('user',{
         id => 1,
+    });
+
+=head2 delete_by_sql
+
+delete record by specific sql. return delete row count.
+
+example:
+
+    my $delete_row_count = Your::Model->delete_by_sql(
+        q{DELETE FROM user WHERE id = ?},
+        [1]
     });
 
 =head2 find_or_create
 
-create record if not exsists record
+create record if not exsists record.
+
+my $row = Your::Model->find_or_create($table, \%row);
+
+return object is a DBIx::Skinny::Row's object.
+
+example:
 
     my $row = Your::Model->find_or_create('usr',{
         id   => 1,
@@ -784,6 +929,8 @@ nekoya : Ryo Miyake
 oinume: Kazuhiro Oinuma
 
 fujiwara: Shunichiro Fujiwara
+
+pjam: Tomoyuki Misonou
 
 =head1 REPOSITORY
 

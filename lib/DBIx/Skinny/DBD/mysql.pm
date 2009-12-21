@@ -1,6 +1,7 @@
 package DBIx::Skinny::DBD::mysql;
 use strict;
 use warnings;
+use DBIx::Skinny::SQL;
 
 sub last_insert_id {
     $_[1]->{mysql_insertid} || $_[1]->{insertid}
@@ -9,6 +10,9 @@ sub last_insert_id {
 sub sql_for_unixtime {
     return "UNIX_TIMESTAMP()";
 }
+
+sub quote    { '`' }
+sub name_sep { '.' }
 
 sub bulk_insert {
     my ($skinny, $table, $args) = @_;
@@ -42,6 +46,8 @@ sub bulk_insert {
 
     return 1;
 }
+
+sub query_builder_class { 'DBIx::Skinny::SQL' }
 
 1;
 

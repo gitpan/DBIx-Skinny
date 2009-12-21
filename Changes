@@ -1,5 +1,15 @@
 Revision history for Perl extension DBIx::Skinny
 
+0.05
+   2009-12-21
+        - FIXED: quote col (thanks noblejasper/fujiwara).
+                  (table etc no not yet.)
+        - FIXED: fetchrow_hashref('NAME_lc') for Oracle. (thanks Tomoyuki Misonou)
+        - ADD: Oracle support (thanks Tomoyuki Misonou)
+        - FIXED: set_dbh method bug. (report thanks walf443)
+        - FIXED: Row::set method using deflate data. (thanks nekoya)
+        - ADD: install_common_trigger method for DBIx::Skinny::Schema (thanks nekoya)
+
 0.04
    2009-10-01
         - FIXED: avoid warning, in case of binds contains undef by Profiler.pm (thanks nekoya)
