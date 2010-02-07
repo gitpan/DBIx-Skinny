@@ -5,8 +5,30 @@ use warnings;
 BEGIN {
     if ($] <= 5.008000) {
         require Encode;
+        no strict 'refs';
+        *utf8_on = sub {
+            my ($class, $col, $data) = @_;
+            Encode::_utf8_on($data) unless Encode::is_utf8($data);
+            $data;
+        };
+        *utf8_off = sub {
+            my ($class, $col, $data) = @_;
+            Encode::_utf8_off($data) if Encode::is_utf8($data);
+            $data;
+        };
     } else {
         require utf8;
+        no strict 'refs';
+        *utf8_on = sub {
+            my ($class, $col, $data) = @_;
+            utf8::decode($data) unless utf8::is_utf8($data);
+            $data;
+        };
+        *utf8_off = sub {
+            my ($class, $col, $data) = @_;
+            utf8::encode($data) if utf8::is_utf8($data);
+            $data;
+        };
     }
 }
 
@@ -41,15 +63,10 @@ sub import {
     warnings->import;
 }
 
-sub _get_caller_class {
-    my $caller = caller(1);
-    return $caller;
-}
-
 sub install_table ($$) {
     my ($table, $install_code) = @_;
 
-    my $class = _get_caller_class;
+    my $class = caller;
     $class->schema_info->{_installing_table} = $table;
         $install_code->();
     delete $class->schema_info->{_installing_table};
@@ -59,7 +76,7 @@ sub schema (&) { shift }
 sub pk ($) {
     my $column = shift;
 
-    my $class = _get_caller_class;
+    my $class = caller;
     $class->schema_info->{
         $class->schema_info->{_installing_table}
     }->{pk} = $column;
@@ -67,7 +84,7 @@ sub pk ($) {
 sub columns (@) {
     my @columns = @_;
 
-    my $class = _get_caller_class;
+    my $class = caller;
     $class->schema_info->{
         $class->schema_info->{_installing_table}
     }->{columns} = \@columns;
@@ -76,7 +93,7 @@ sub columns (@) {
 sub trigger ($$) {
     my ($trigger_name, $code) = @_;
 
-    my $class = _get_caller_class;
+    my $class = caller;
     push @{$class->schema_info->{
         $class->schema_info->{_installing_table}
     }->{trigger}->{$trigger_name}}, $code;
@@ -99,7 +116,7 @@ sub call_trigger {
 sub install_inflate_rule ($$) {
     my ($rule, $install_inflate_code) = @_;
 
-    my $class = _get_caller_class;
+    my $class = caller;
     $class->inflate_rules->{_installing_rule} = $rule;
         $install_inflate_code->();
     delete $class->inflate_rules->{_installing_rule};
@@ -108,7 +125,7 @@ sub install_inflate_rule ($$) {
 sub inflate (&) {
     my $code = shift;    
 
-    my $class = _get_caller_class;
+    my $class = caller;
     $class->inflate_rules->{
         $class->inflate_rules->{_installing_rule}
     }->{inflate} = $code;
@@ -117,7 +134,7 @@ sub inflate (&) {
 sub deflate (&) {
     my $code = shift;
 
-    my $class = _get_caller_class;
+    my $class = caller;
     $class->inflate_rules->{
         $class->inflate_rules->{_installing_rule}
     }->{deflate} = $code;
@@ -152,14 +169,14 @@ sub callback (&) { shift }
 sub install_common_trigger ($$) {
     my ($trigger_name, $code) = @_;
 
-    my $class = _get_caller_class;
+    my $class = caller;
     push @{$class->common_triggers->{$trigger_name}}, $code;
 }
 
 sub install_utf8_columns (@) {
     my @columns = @_;
 
-    my $class = _get_caller_class;
+    my $class = caller;
     for my $col (@columns) {
         $class->utf8_columns->{$col} = 1;
     }
@@ -168,32 +185,6 @@ sub install_utf8_columns (@) {
 sub is_utf8_column {
     my ($class, $col) = @_;
     return $class->utf8_columns->{$col} ? 1 : 0;
-}
-
-sub utf8_on {
-    my ($class, $col, $data) = @_;
-
-    if ( $class->is_utf8_column($col) ) {
-        if ($] <= 5.008000) {
-            Encode::_utf8_on($data) unless Encode::is_utf8($data);
-        } else {
-            utf8::decode($data) unless utf8::is_utf8($data);
-        }
-    }
-    return $data;
-}
-
-sub utf8_off {
-    my ($class, $col, $data) = @_;
-
-    if ( $class->is_utf8_column($col) ) {
-        if ($] <= 5.008000) {
-            Encode::_utf8_off($data) if Encode::is_utf8($data);
-        } else {
-            utf8::encode($data) if utf8::is_utf8($data);
-        }
-    }
-    return $data;
 }
 
 1;

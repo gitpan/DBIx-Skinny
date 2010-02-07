@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -31,7 +31,7 @@ sub import {
         dbh             => $args->{dbh}||undef,
         dbd             => $dbd_type ? DBIx::Skinny::DBD->new($dbd_type) : undef,
         schema          => $schema,
-        profiler        => DBIx::Skinny::Profiler->new,
+        profiler        => ( $args->{profiler} || DBIx::Skinny::Profiler->new ),
         profile         => $ENV{SKINNY_PROFILE}||0,
         klass           => $caller,
         row_class_map   => +{},
@@ -98,7 +98,20 @@ sub new {
     return $self;
 }
 
-sub schema { shift->attribute->{schema} }
+my $schema_checked = 0;
+sub schema { 
+    my $schema = $_[0]->attribute->{schema};
+    unless ( $schema_checked ) {
+        do {
+            no strict 'refs';
+            unless ( defined *{"@{[ $schema ]}::schema_info"} ) {
+                die "$schema is something wrong( is it realy loaded? )";
+            }
+        };
+        $schema_checked++;
+    }
+    return $schema;
+}
 sub profiler {
     my ($class, $sql, $bind) = @_;
     my $attr = $class->attribute;
@@ -164,7 +177,8 @@ sub connect {
         $attr->{username},
         $attr->{password},
         { RaiseError => 1, PrintError => 0, AutoCommit => 1, %{ $attr->{connect_options} || {} } }
-    );
+    ) or Carp::croak("Connection error: " . $DBI::errstr);
+
     $attr->{dbh};
 }
 
@@ -186,7 +200,13 @@ sub setup_dbd {
     $class->attribute->{dbd} = DBIx::Skinny::DBD->new($dbd_type);
 }
 
-sub dbd { shift->attribute->{dbd} }
+sub dbd {
+    $_[0]->attribute->{dbd} or do {
+        require Data::Dumper;
+        Carp::croak("attribute dbd is not exist. does it connected? attribute: @{[ Data::Dumper::Dumper($_[0]->attribute) ]}");
+    };
+}
+
 sub dbh {
     my $class = shift;
 
@@ -219,7 +239,10 @@ sub call_schema_trigger {
 sub do {
     my ($class, $sql) = @_;
     $class->profiler($sql);
-    $class->dbh->do($sql);
+    eval { $class->dbh->do($sql) };
+    if ($@) {
+        $class->_stack_trace('', $sql, '', $@);
+    }
 }
 
 sub count {
@@ -240,7 +263,6 @@ sub count {
 sub resultset {
     my ($class, $args) = @_;
     $args->{skinny} = $class;
-
     my $query_builder_class = $class->dbd->query_builder_class;
     $query_builder_class->new($args);
 }
@@ -348,13 +370,24 @@ sub data2itr {
     );
 }
 
+my $base_row_class;
 sub _mk_anon_row_class {
-    my ($class, $key, $base_row_class) = @_;
+    my ($class, $key) = @_;
 
-    my $row_class = "${base_row_class}::C";
+    my $row_class = 'DBIx::Skinny::Row::C';
     $row_class .= Digest::SHA1::sha1_hex($key);
 
-    { no strict 'refs'; @{"$row_class\::ISA"} = ($base_row_class); }
+    my $attr = $class->attribute;
+    $attr->{base_row_class} ||= do {
+        my $tmp_base_row_class = join '::', $attr->{klass}, 'Row';
+        eval "use $tmp_base_row_class"; ## no critic
+        if ($@) {
+            'DBIx::Skinny::Row';
+        } else {
+            $tmp_base_row_class;
+        }
+    };
+    { no strict 'refs'; @{"$row_class\::ISA"} = ($attr->{base_row_class}); }
 
     return $row_class;
 }
@@ -362,7 +395,7 @@ sub _mk_anon_row_class {
 sub _guess_table_name {
     my ($class, $sql) = @_;
 
-    if ($sql =~ /^.+from\s+([\w]+)\s/i) {
+    if ($sql =~ /^.+from\s+([\w]+)\s*/i) {
         return $1;
     }
     return;
@@ -376,7 +409,7 @@ sub _mk_row_class {
     my $base_row_class = $attr->{row_class_map}->{$table}||'';
 
     if ( $base_row_class eq 'DBIx::Skinny::Row' ) {
-        return $class->_mk_anon_row_class($key, $base_row_class);
+        return $class->_mk_anon_row_class($key);
     } elsif ($base_row_class) {
         return $base_row_class;
     } elsif ($table) {
@@ -384,13 +417,13 @@ sub _mk_row_class {
         eval "use $tmp_base_row_class"; ## no critic
         if ($@) {
             $attr->{row_class_map}->{$table} = 'DBIx::Skinny::Row';
-            return $class->_mk_anon_row_class($key, $attr->{row_class_map}->{$table});
+            return $class->_mk_anon_row_class($key);
         } else {
             $attr->{row_class_map}->{$table} = $tmp_base_row_class;
             return $tmp_base_row_class;
         }
     } else {
-        return $class->_mk_anon_row_class($key, 'DBIx::Skinny::Row');
+        return $class->_mk_anon_row_class($key);
     }
 }
 
@@ -618,6 +651,8 @@ DBIx::Skinny - simple DBI wrapper/ORMapper
 
 =head1 SYNOPSIS
 
+create your db model base class.
+
     package Your::Model;
     use DBIx::Skinny setup => {
         dsn => 'dbi:SQLite:',
@@ -626,6 +661,9 @@ DBIx::Skinny - simple DBI wrapper/ORMapper
     };
     1;
     
+create your db schema class.
+See DBIx::Skinny::Schema for docs on defining schema class.
+
     package Your::Model::Schema;
     use DBIx::Skinny::Schema;
     
@@ -638,10 +676,11 @@ DBIx::Skinny - simple DBI wrapper/ORMapper
     };
     1;
     
-    # in your script:
+in your execute script.
+
     use Your::Model;
     
-    # insert    
+    # insert new record.
     my $row = Your::Model->insert('user',
         {
             id   => 1,
@@ -655,16 +694,18 @@ DBIx::Skinny - simple DBI wrapper/ORMapper
 =head1 DESCRIPTION
 
 DBIx::Skinny is simple DBI wrapper and simple O/R Mapper.
+Lightweight and Little dependence ORM.
+The Row objects is generated based on arbitrarily SQL. 
 
 =head1 METHOD
 
 =head2 new
 
+Arguments: $connection_info
+Return: DBIx::Skinny's instance object.
+
 create your skinny instance.
-
 It is possible to use it even by the class method.
-
-my $db = Your::Model->new($connection_info);
 
 $connection_info is optional argment.
 
@@ -690,11 +731,10 @@ or
 
 =head2 insert
 
+Arguments: $table_name, \%row_data
+Return: DBIx::Skinny::Row's instance object.
+
 insert new record and get inserted row object.
-
-my $row = Your::Model->insert($table, \%row_data);
-
-return object is a DBIx::Skinny::Row's object.
 
 example:
 
@@ -711,11 +751,20 @@ or
         name => 'nekokak',
     });
 
+=head2 create
+
+insert method alias.
+
 =head2 bulk_insert
 
-insert many record.
+Arguments: $table_name, \@row_datas
+Return: true
 
-Your::Model->bulk_insert($table, \@rows);
+Accepts either an arrayref of hashrefs.
+each hashref should be a structure suitable
+forsubmitting to a Your::Model->insert(...) method.
+
+insert many record by bulk.
 
 example:
 
@@ -734,15 +783,14 @@ example:
         },
     ]);
 
-=head2 create
-
-insert method alias.
-
 =head2 update
 
-update record. return update row count.
+Arguments: $table_name, \%update_row_data, \%update_condition
+Return: updated row count
 
-my $cnt = Your::Model->update($table, \%update_column);
+$update_condition is optional argment.
+
+update record.
 
 example:
 
@@ -750,30 +798,50 @@ example:
         name => 'nomaneko',
     },{ id => 1 });
 
+or 
+
+    # see) DBIx::Skinny::Row's POD
+    my $row = Your::Model->single('user',{id => 1});
+    $row->update({name => 'nomaneko'});
+
 =head2 update_by_sql
 
-update record by specific sql. return update row count.
+Arguments: $sql, \@bind_values
+Return: updated row count
+
+update record by specific sql.
 
 example:
     my $update_row_count = Your::Model->update_by_sql(
         q{UPDATE user SET name = ?},
-        'nomaneko'
+        ['nomaneko']
     );
 
 =head2 delete
 
-delete record. return delete row count.
+Arguments: $table, \%delete_where_condition
+Return: updated row count
 
-my $cnt = Your::Model->delete($table, \%delete_where_condition);
+delete record.
 
 example:
+
     my $delete_row_count = Your::Model->delete('user',{
         id => 1,
     });
 
+or
+
+    # see) DBIx::Skinny::Row's POD
+    my $row = Your::Model->single('user', {id => 1});
+    $row->delete
+
 =head2 delete_by_sql
 
-delete record by specific sql. return delete row count.
+Arguments: $sql, \@bind_values
+Return: updated row count
+
+delete record by specific sql.
 
 example:
 
@@ -784,11 +852,10 @@ example:
 
 =head2 find_or_create
 
+Arguments: $table, \%values_and_search_condition
+Return: DBIx::Skinny::Row's instance object.
+
 create record if not exsists record.
-
-my $row = Your::Model->find_or_create($table, \%row);
-
-return object is a DBIx::Skinny::Row's object.
 
 example:
 
@@ -803,7 +870,13 @@ find_or_create method alias.
 
 =head2 search
 
+Arguments: $table, \%search_condition, \%search_attr
+Return: DBIx::Skinny::Iterator's instance object.
+
 simple search method.
+search method get DBIx::Skinny::Iterator's instance object.
+
+see L<DBIx::Skinny::Iterator>
 
 get iterator:
 
@@ -813,13 +886,22 @@ get rows:
 
     my @rows = Your::Model->search('user',{id => 1},{order_by => 'id'});
 
+Please refer to L<DBIx::Skinny::Manual> for the details of search method.
+
 =head2 single
 
-get one record
+Arguments: $table, \%search_condition
+Return: DBIx::Skinny::Row's instance object.
+
+get one record.
+give back one case of the beginning when it is acquired plural records by single method.
 
     my $row = Your::Model->single('user',{id =>1});
 
 =head2 resultset
+
+Arguments: \%options
+Return: DBIx::Skinny::SQL's instance object.
 
 result set case:
 
@@ -834,6 +916,8 @@ result set case:
     $rs->offset(10);
     $rs->order({ column => 'id', desc => 'DESC' });
     my $itr = $rs->retrieve;
+
+Please refer to L<DBIx::Skinny::Manual> for the details of resultset method.
 
 =head2 count
 
@@ -931,6 +1015,12 @@ oinume: Kazuhiro Oinuma
 fujiwara: Shunichiro Fujiwara
 
 pjam: Tomoyuki Misonou
+
+=head1 SUPPORT
+
+  irc: #dbix-skinny@irc.perl.org
+
+  ML: http://groups.google.com/group/dbix-skinny
 
 =head1 REPOSITORY
 

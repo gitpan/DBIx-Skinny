@@ -94,6 +94,17 @@ describe 'reconnect test' => run {
         is $row->name, 'perl';
     };
 
+    test '(re)connect fail' => run {
+        dies_ok {
+            Mock::Basic->reconnect(
+                {
+                    dsn => 'dbi:mysql:must_not_exist_db',
+                    username => 'must_not_exist_user',
+                    password => 'arienai_password',
+                }
+            );
+        };
+    };
 
     cleanup {
         unlink qw{./db1.db db2.db};
