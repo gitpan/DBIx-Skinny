@@ -1,5 +1,12 @@
 Revision history for Perl extension DBIx::Skinny
 
+0.07
+   2010-03-05
+        - FIXED: schema_info is not exist case. (thanks walf443)
+        - FIXED: row class syntax error case. (report by cho45)
+        - MOD: no depends Test::Declare.
+        - MOD: update/upate_by_sql/delete/delete_by_sql use _execute method (thanks magicalhat)
+
 0.06
    2010-02-07
         - FIXED: _guess_table_name bug.

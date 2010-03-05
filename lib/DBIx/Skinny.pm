@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -270,7 +270,14 @@ sub resultset {
 sub search {
     my ($class, $table, $where, $opt) = @_;
 
-    my $cols = $opt->{select} || $class->schema->schema_info->{$table}->{columns};
+    my $cols = $opt->{select};
+    unless ($cols) {
+        my $column_info = $class->schema->schema_info->{$table};
+        unless ( $column_info ) {
+            Carp::croak("schema_info is not exist for table $table");
+        }
+        $cols = $column_info->{columns};
+    }
     my $rs = $class->resultset(
         {
             select => $cols,
@@ -381,6 +388,9 @@ sub _mk_anon_row_class {
     $attr->{base_row_class} ||= do {
         my $tmp_base_row_class = join '::', $attr->{klass}, 'Row';
         eval "use $tmp_base_row_class"; ## no critic
+        (my $rc = $tmp_base_row_class) =~ s|::|/|g;
+        die $@ if $@ && $@ !~ /Can't locate $rc\.pm in \@INC/;
+
         if ($@) {
             'DBIx::Skinny::Row';
         } else {
@@ -415,6 +425,9 @@ sub _mk_row_class {
     } elsif ($table) {
         my $tmp_base_row_class = join '::', $attr->{klass}, 'Row', _camelize($table);
         eval "use $tmp_base_row_class"; ## no critic
+        (my $rc = $tmp_base_row_class) =~ s|::|/|g;
+        die $@ if $@ && $@ !~ /Can't locate $rc\.pm in \@INC/;
+
         if ($@) {
             $attr->{row_class_map}->{$table} = 'DBIx::Skinny::Row';
             return $class->_mk_anon_row_class($key);
@@ -530,8 +543,8 @@ sub update {
     my $sql = "UPDATE $table SET " . join(', ', @set) . ' ' . $stmt->as_sql_where;
 
     $class->profiler($sql, \@bind);
-    my $sth = $class->dbh->prepare($sql);
-    my $rows = $sth->execute(@bind);
+    my $sth = $class->_execute($sql, \@bind);
+    my $rows = $sth->rows;
 
     $class->_close_sth($sth);
     $class->call_schema_trigger('post_update', $schema, $table, $rows);
@@ -543,8 +556,8 @@ sub update_by_sql {
     my ($class, $sql, $bind) = @_;
 
     $class->profiler($sql, $bind);
-    my $sth = $class->dbh->prepare($sql);
-    my $rows = $sth->execute(@$bind);
+    my $sth = $class->_execute($sql, $bind);
+    my $rows = $sth->rows;
     $class->_close_sth($sth);
 
     $rows;
@@ -565,25 +578,25 @@ sub delete {
     $class->_add_where($stmt, $where);
 
     my $sql = "DELETE " . $stmt->as_sql;
-    $class->profiler($sql, $stmt->bind);
     my $sth = $class->_execute($sql, $stmt->bind);
+    my $rows = $sth->rows;
 
-    $class->call_schema_trigger('post_delete', $schema, $table);
+    $class->call_schema_trigger('post_delete', $schema, $table, $rows);
 
-    my $ret = $sth->rows;
     $class->_close_sth($sth);
-    $ret;
+    $rows;
 }
 
 sub delete_by_sql {
     my ($class, $sql, $bind) = @_;
 
     $class->profiler($sql, $bind);
-    my $sth = $class->dbh->prepare($sql);
-    my $ret = $sth->execute(@$bind);
+    my $sth = $class->_execute($sql, $bind);
+    my $rows = $sth->rows;
+
     $class->_close_sth($sth);
 
-    $ret;
+    $rows;
 }
 
 *find_or_insert = \*find_or_create;
