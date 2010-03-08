@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0701';
+our $VERSION = '0.0702';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -274,7 +274,7 @@ sub search {
     unless ($cols) {
         my $column_info = $class->schema->schema_info->{$table};
         unless ( $column_info ) {
-            Carp::croak("schema_info is not exist for table $table");
+            Carp::croak("schema_info is not exist for table '$table'");
         }
         $cols = $column_info->{columns};
     }
