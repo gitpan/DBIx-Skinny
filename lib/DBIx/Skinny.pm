@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0703';
+our $VERSION = '0.0704';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -24,6 +24,7 @@ sub import {
 
     my $dbd_type = _dbd_type($args);
     my $_attribute = +{
+        check_schema    => defined $args->{check_schema} ? $args->{check_schema} : 1,
         dsn             => $args->{dsn},
         username        => $args->{username},
         password        => $args->{password},
@@ -100,8 +101,9 @@ sub new {
 
 my $schema_checked = 0;
 sub schema { 
-    my $schema = $_[0]->attribute->{schema};
-    unless ( $schema_checked ) {
+    my $attribute = $_[0]->attribute;
+    my $schema = $attribute->{schema};
+    if ( $attribute->{check_schema} && !$schema_checked ) {
         do {
             no strict 'refs';
             unless ( defined *{"@{[ $schema ]}::schema_info"} ) {
@@ -351,8 +353,14 @@ sub search_named {
     my @bind;
     $sql =~ s{:([A-Za-z_][A-Za-z0-9_]*)}{
         Carp::croak("$1 is not exists in hash") if !exists $named_bind{$1};
-        push @bind, $named_bind{$1};
-        '?'
+        if ( ref $named_bind{$1} && ref $named_bind{$1} eq "ARRAY" ) {
+            push @bind, @{ $named_bind{$1} };
+            my $tmp = join ',', map { '?' } @{ $named_bind{$1} };
+            "( $tmp )";
+        } else {
+            push @bind, $named_bind{$1};
+            '?'
+        }
     }ge;
 
     $class->search_by_sql($sql, \@bind, $opt_table_info);
@@ -962,6 +970,11 @@ get simple count
 execute named query
 
     my $itr = Your::Model->search_named(q{SELECT * FROM user WHERE id = :id}, {id => 1});
+
+If you give ArrayRef to value, that is expanded to "(?,?,?,?)" in SQL.
+It's useful in case use IN statement.
+
+    my $itr = Your::Model->search_named(q{SELECT * FROM user WHERE id IN :ids}, {id => [1, 2, 3]});
 
 =head2 search_by_sql
 
