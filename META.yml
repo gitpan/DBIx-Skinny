@@ -6,10 +6,11 @@ build_requires:
   ExtUtils::MakeMaker: 6.42
   Test::Exception: 0
   Test::More: 0.94
+  Test::Output: 0
 configure_requires:
   ExtUtils::MakeMaker: 6.42
 distribution_type: module
-generated_by: 'Module::Install version 0.94'
+generated_by: 'Module::Install version 0.95'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
@@ -29,4 +30,5 @@ requires:
   UNIVERSAL::require: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.0704
+  repository: git://github.com/nekokak/p5-dbix-skinny.git
+version: 0.0705
