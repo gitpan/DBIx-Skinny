@@ -32,4 +32,4 @@ requires:
 resources:
   license: http://dev.perl.org/licenses/
   repository: git://github.com/nekokak/p5-dbix-skinny.git
-version: 0.0707
+version: 0.0708

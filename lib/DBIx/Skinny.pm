@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0707';
+our $VERSION = '0.0708';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -266,7 +266,7 @@ sub setup_dbd {
 sub dbd {
     $_[0]->attribute->{dbd} or do {
         require Data::Dumper;
-        Carp::croak("attribute dbd is not exist. does it connected? attribute: @{[ Data::Dumper::Dumper($_[0]->attribute) ]}");
+        Carp::croak("attribute dbd does not exist. does it connected? attribute: @{[ Data::Dumper::Dumper($_[0]->attribute) ]}");
     };
 }
 
@@ -337,7 +337,7 @@ sub search {
     unless ($cols) {
         my $column_info = $class->schema->schema_info->{$table};
         unless ( $column_info ) {
-            Carp::croak("schema_info is not exist for table '$table'");
+            Carp::croak("schema_info does not exist for table '$table'");
         }
         $cols = $column_info->{columns};
     }
@@ -393,7 +393,7 @@ sub search_named {
     my %named_bind = %{$args};
     my @bind;
     $sql =~ s{:([A-Za-z_][A-Za-z0-9_]*)}{
-        Carp::croak("$1 is not exists in hash") if !exists $named_bind{$1};
+        Carp::croak("$1 does not exists in hash") if !exists $named_bind{$1};
         if ( ref $named_bind{$1} && ref $named_bind{$1} eq "ARRAY" ) {
             push @bind, @{ $named_bind{$1} };
             my $tmp = join ',', map { '?' } @{ $named_bind{$1} };
@@ -671,7 +671,8 @@ sub find_or_create {
     my $row = $class->single($table, $args);
     return $row if $row;
     $row = $class->insert($table, $args);
-    return $row;
+    my $pk = $class->schema->schema_info->{$table}->{pk};
+    $class->single($table, { $pk => $row->get_column($pk) });
 }
 
 sub _add_where {
