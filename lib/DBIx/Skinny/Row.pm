@@ -1,7 +1,7 @@
 package DBIx::Skinny::Row;
 use strict;
 use warnings;
-use Carp;
+use Carp qw//;
 
 sub new {
     my ($class, $args) = @_;
@@ -42,11 +42,13 @@ sub _lazy_get_data {
 sub get_column {
     my ($self, $col) = @_;
 
-    my $data = $self->{row_data}->{$col};
+    unless ( $col ) {
+        Carp::croak('please specify $col for first argument');
+    }
 
-    $data = $self->{skinny}->schema->utf8_on($col, $data);
+    my $data = exists $self->{row_data}->{$col} ? $self->{row_data}->{$col} : Carp::croak("$col no selected column.");
 
-    return $data;
+    return $self->{skinny}->schema->utf8_on($col, $data);
 }
 
 sub get_columns {
@@ -102,18 +104,18 @@ sub _update_or_delete_cond {
     my ($self, $table) = @_;
 
     unless ($table) {
-        croak "no table info";
+        Carp::croak "no table info";
     }
 
     my $schema_info = $self->{skinny}->schema->schema_info;
     unless ( $schema_info->{$table} ) {
-        croak "unknown table: $table";
+        Carp::croak "unknown table: $table";
     }
 
     # get target table pk
     my $pk = $schema_info->{$table}->{pk};
     unless ($pk) {
-        croak "$table have no pk.";
+        Carp::croak "$table have no pk.";
     }
 
     # multi primary keys
