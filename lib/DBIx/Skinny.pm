@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0709';
+our $VERSION = '0.0710';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -49,11 +49,11 @@ sub import {
             new
             schema profiler
             dbh dbd connect connect_info _dbd_type reconnect set_dbh setup_dbd do_on_connect
-            call_schema_trigger
+            call_schema_trigger bind_params
             do resultset search single search_by_sql search_named count
             data2itr find_or_new
                 _get_sth_iterator _mk_row_class _camelize _mk_anon_row_class _guess_table_name
-            insert bulk_insert create update delete find_or_create find_or_insert
+            insert replace _insert_or_replace bulk_insert create update delete find_or_create find_or_insert
             update_by_sql delete_by_sql
                 _add_where
             _execute _close_sth _stack_trace
@@ -79,25 +79,27 @@ sub new {
     my ($class, $connection_info) = @_;
     my $attr = $class->attribute;
 
-    my $dbd      = delete $attr->{dbd};
-    my $profiler = delete $attr->{profiler};
-    my $dbh      = delete $attr->{dbh};
-    my $connect_options = delete $attr->{connect_options};
-    my $on_connect_do = delete $attr->{on_connect_do};
+    my %unstorable_attribute;
+    for my $key ( qw/dbd profiler dbh connect_options on_connect_do / ) {
+        $unstorable_attribute{$key} = delete $attr->{$key};
+    }
 
     my $self = bless Storable::dclone($attr), $class;
 
-    $self->attribute->{profiler} = $profiler;
-    $attr->{dbd}      = $dbd;
-    $attr->{dbh}      = $dbh;
-    $attr->{profiler} = $profiler;
-    $attr->{on_connect_do} = $on_connect_do;
+    # restore.
+    for my $key ( keys %unstorable_attribute ) {
+        $attr->{$key} = $unstorable_attribute{$key};
+    }
+
 
     if ($connection_info) {
+
+        $self->attribute->{profiler} = $unstorable_attribute{profiler};
+
         if ( $connection_info->{on_connect_do} ) {
             $self->attribute->{on_connect_do} = $connection_info->{on_connect_do};
         } else {
-            $self->attribute->{on_connect_do} = $on_connect_do;
+            $self->attribute->{on_connect_do} = $unstorable_attribute{on_connect_do};
         }
 
         if ($connection_info->{dbh}) {
@@ -107,11 +109,11 @@ sub new {
             $self->connect_info($connection_info);
             $self->reconnect;
         }
+
     } else {
-        $self->attribute->{dbd} = $dbd;
-        $self->attribute->{dbh} = $dbh;
-        $self->attribute->{connect_options} = $connect_options;
-        $self->attribute->{on_connect_do} = $on_connect_do;
+        for my $key ( keys %unstorable_attribute ) {
+            $self->attribute->{$key} = $unstorable_attribute{$key};
+        }
     }
 
     return $self;
@@ -132,6 +134,7 @@ sub schema {
     }
     return $schema;
 }
+
 sub profiler {
     my ($class, $sql, $bind) = @_;
     my $attr = $class->attribute;
@@ -175,7 +178,7 @@ sub txn_commit {
     return unless $class->attribute->{active_transaction};
 
     if ( $class->attribute->{rollbacked_in_nested_transaction} ) {
-        Carp::croak "tried to commit but alreay rollbacked in nested transaction.";
+        Carp::croak "tried to commit but already rollbacked in nested transaction.";
     }
     elsif ( $class->attribute->{active_transaction} > 1 ) {
         $class->attribute->{active_transaction}--;
@@ -521,33 +524,45 @@ sub _quote {
     return join $name_sep, map { $quote . $_ . $quote } split /\Q$name_sep\E/, $label;
 }
 
-*create = \*insert;
-sub insert {
-    my ($class, $table, $args) = @_;
+sub bind_params {
+    my($class, $table, $columns, $sth) = @_;
 
     my $schema = $class->schema;
-    $class->call_schema_trigger('pre_insert', $schema, $table, $args);
+    my $dbd    = $class->dbd;
+    my $i = 1;
+    for my $column (@{ $columns }) {
+        my($col, $val) = @{ $column };
+        my $type = $schema->column_type($table, $col);
+        my $attr = $type ? $dbd->bind_param_attributes($type) : undef;
+        $sth->bind_param($i++, $val, $attr);
+    }
+}
+
+sub _insert_or_replace {
+    my ($class, $is_replace, $table, $args) = @_;
+
+    my $schema = $class->schema;
 
     # deflate
     for my $col (keys %{$args}) {
         $args->{$col} = $schema->call_deflate($col, $args->{$col});
     }
 
-    my (@cols,@bind);
+    my (@cols, @column_list);
     for my $col (keys %{ $args }) {
         push @cols, $col;
-        push @bind, $schema->utf8_off($col, $args->{$col});
+        push @column_list, [$col, $schema->utf8_off($col, $args->{$col})];
     }
 
     my $dbd = $class->dbd;
-    # TODO: INSERT or REPLACE. bind_param_attributes etc...
     my $quote = $dbd->quote;
     my $name_sep = $dbd->name_sep;
-    my $sql = "INSERT INTO $table\n";
+    my $sql = $is_replace ? 'REPLACE' : 'INSERT';
+    $sql .= " INTO $table\n";
     $sql .= '(' . join(', ', map {_quote($_, $quote, $name_sep)} @cols) . ')' . "\n" .
             'VALUES (' . join(', ', ('?') x @cols) . ')' . "\n";
 
-    my $sth = $class->_execute($sql, \@bind);
+    my $sth = $class->_execute($sql, \@column_list, $table);
 
     my $pk = $class->schema->schema_info->{$table}->{pk};
     my $id = defined $args->{$pk} ? $args->{$pk} :
@@ -567,6 +582,31 @@ sub insert {
         }
     );
     $obj->setup;
+
+    $obj;
+}
+
+*create = \*insert;
+sub insert {
+    my ($class, $table, $args) = @_;
+
+    my $schema = $class->schema;
+    $class->call_schema_trigger('pre_insert', $schema, $table, $args);
+
+    my $obj = $class->_insert_or_replace(0, $table, $args);
+
+    $class->call_schema_trigger('post_insert', $schema, $table, $obj);
+
+    $obj;
+}
+
+sub replace {
+    my ($class, $table, $args) = @_;
+
+    my $schema = $class->schema;
+    $class->call_schema_trigger('pre_insert', $schema, $table, $args);
+
+    my $obj = $class->_insert_or_replace(1, $table, $args);
 
     $class->call_schema_trigger('post_insert', $schema, $table, $obj);
 
@@ -594,24 +634,25 @@ sub update {
 
     my $quote = $class->dbd->quote;
     my $name_sep = $class->dbd->name_sep;
-    my (@set,@bind);
+    my (@set, @column_list);
     for my $col (keys %{ $args }) {
         my $quoted_col = _quote($col, $quote, $name_sep);
         if (ref($values->{$col}) eq 'SCALAR') {
             push @set, "$quoted_col = " . ${ $values->{$col} };
         } else {
             push @set, "$quoted_col = ?";
-            push @bind, $schema->utf8_off($col, $values->{$col});
+            push @column_list, [$col, $schema->utf8_off($col, $values->{$col})];
         }
     }
 
     my $stmt = $class->resultset;
     $class->_add_where($stmt, $where);
-    push @bind, @{ $stmt->bind };
+    my @where_values = map {[$_ => $stmt->where_values->{$_}]} keys %{$stmt->where_values};
+    push @column_list, @where_values;
 
     my $sql = "UPDATE $table SET " . join(', ', @set) . ' ' . $stmt->as_sql_where;
 
-    my $sth = $class->_execute($sql, \@bind);
+    my $sth = $class->_execute($sql, \@column_list, $table);
     my $rows = $sth->rows;
 
     $class->_close_sth($sth);
@@ -638,14 +679,15 @@ sub delete {
 
     my $stmt = $class->resultset(
         {
-            from   => [$table],
+            from => [$table],
         }
     );
 
     $class->_add_where($stmt, $where);
 
     my $sql = "DELETE " . $stmt->as_sql;
-    my $sth = $class->_execute($sql, $stmt->bind);
+    my @where_values = map {[$_ => $stmt->where_values->{$_}]} keys %{$stmt->where_values};
+    my $sth = $class->_execute($sql, \@where_values, $table);
     my $rows = $sth->rows;
 
     $class->call_schema_trigger('post_delete', $schema, $table, $rows);
@@ -683,15 +725,28 @@ sub _add_where {
 }
 
 sub _execute {
-    my ($class, $stmt, $bind) = @_;
+    my ($class, $stmt, $args, $table) = @_;
 
-    $class->profiler($stmt, $bind);
+use Data::Dumper;
 
-    my $sth;
-    eval {
-        $sth = $class->dbh->prepare($stmt);
-        $sth->execute(@{$bind});
-    };
+    my ($sth, $bind);
+    if ($table) {
+        $bind = [map {$_->[1]} @$args];
+        $class->profiler($stmt, $bind);
+        eval {
+            $sth = $class->dbh->prepare($stmt);
+            $class->bind_params($table, $args, $sth);
+            $sth->execute;
+        };
+    } else {
+        $bind = $args;
+        $class->profiler($stmt, $bind);
+        eval {
+            $sth = $class->dbh->prepare($stmt);
+            $sth->execute(@{$args});
+        };
+    }
+
     if ($@) {
         $class->_stack_trace($sth, $stmt, $bind, $@);
     }

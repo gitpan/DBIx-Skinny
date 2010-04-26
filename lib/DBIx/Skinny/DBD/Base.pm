@@ -16,7 +16,7 @@ sub bulk_insert {
     my $txn; $txn = $skinny->txn_scope unless $skinny->attribute->{active_transaction} != 0;
 
         for my $arg ( @{$args} ) {
-            $skinny->insert($table, $arg);
+            $skinny->_insert_or_replace(0, $table, $arg);
         }
 
     $txn->commit if $txn;
@@ -25,6 +25,7 @@ sub bulk_insert {
 }
 
 sub query_builder_class { 'DBIx::Skinny::SQL' }
+sub bind_param_attributes {}
 
 1;
 
