@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0710';
+our $VERSION = '0.0711';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -13,7 +13,7 @@ use DBIx::Skinny::Profiler::Trace;
 use DBIx::Skinny::Transaction;
 use Digest::SHA1 ();
 use Carp ();
-use Storable;
+use Storable ();
 
 sub import {
     my ($class, %opt) = @_;
@@ -127,7 +127,7 @@ sub schema {
         do {
             no strict 'refs';
             unless ( defined *{"@{[ $schema ]}::schema_info"} ) {
-                die "$schema is something wrong( is it realy loaded? )";
+                die "$schema is something wrong( is it really loaded? )";
             }
         };
         $schema_checked++;
@@ -647,7 +647,7 @@ sub update {
 
     my $stmt = $class->resultset;
     $class->_add_where($stmt, $where);
-    my @where_values = map {[$_ => $stmt->where_values->{$_}]} keys %{$stmt->where_values};
+    my @where_values = map {[$_ => $stmt->where_values->{$_}]} @{$stmt->bind_col};
     push @column_list, @where_values;
 
     my $sql = "UPDATE $table SET " . join(', ', @set) . ' ' . $stmt->as_sql_where;
@@ -686,7 +686,7 @@ sub delete {
     $class->_add_where($stmt, $where);
 
     my $sql = "DELETE " . $stmt->as_sql;
-    my @where_values = map {[$_ => $stmt->where_values->{$_}]} keys %{$stmt->where_values};
+    my @where_values = map {[$_ => $stmt->where_values->{$_}]} @{$stmt->bind_col};
     my $sth = $class->_execute($sql, \@where_values, $table);
     my $rows = $sth->rows;
 
