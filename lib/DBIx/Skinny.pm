@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0711';
+our $VERSION = '0.0712';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -39,6 +39,7 @@ sub import {
         klass           => $caller,
         row_class_map   => +{},
         active_transaction => 0,
+        last_pid => $$,
     };
 
     {
@@ -50,7 +51,7 @@ sub import {
             schema profiler
             dbh dbd connect connect_info _dbd_type reconnect set_dbh setup_dbd do_on_connect
             call_schema_trigger bind_params
-            do resultset search single search_by_sql search_named count
+            do resultset search search_rs single search_by_sql search_named count
             data2itr find_or_new
                 _get_sth_iterator _mk_row_class _camelize _mk_anon_row_class _guess_table_name
             insert replace _insert_or_replace bulk_insert create update delete find_or_create find_or_insert
@@ -78,6 +79,8 @@ sub import {
 sub new {
     my ($class, $connection_info) = @_;
     my $attr = $class->attribute;
+
+    $attr->{last_pid} = $$;
 
     my %unstorable_attribute;
     for my $key ( qw/dbd profiler dbh connect_options on_connect_do / ) {
@@ -277,6 +280,11 @@ sub dbh {
     my $class = shift;
 
     my $dbh = $class->connect;
+    if ( $class->attribute->{last_pid} != $$ ) {
+        $class->attribute->{last_pid} = $$;
+        $dbh->{InactiveDestroy} = 1;
+        $dbh = $class->reconnect;
+    }
     unless ($dbh && $dbh->FETCH('Active') && $dbh->ping) {
         $dbh = $class->reconnect;
     }
@@ -336,6 +344,13 @@ sub resultset {
 sub search {
     my ($class, $table, $where, $opt) = @_;
 
+    my $rs = $class->search_rs($table, $where, $opt);
+    $rs->retrieve;
+}
+
+sub search_rs {
+    my ($class, $table, $where, $opt) = @_;
+
     my $cols = $opt->{select};
     unless ($cols) {
         my $column_info = $class->schema->schema_info->{$table};
@@ -380,7 +395,7 @@ sub search {
         }
     }
 
-    $rs->retrieve;
+    return $rs;
 }
 
 sub single {
@@ -448,7 +463,6 @@ sub data2itr {
     );
 }
 
-my $base_row_class;
 sub _mk_anon_row_class {
     my ($class, $key) = @_;
 
@@ -726,8 +740,6 @@ sub _add_where {
 
 sub _execute {
     my ($class, $stmt, $args, $table) = @_;
-
-use Data::Dumper;
 
     my ($sth, $bind);
     if ($table) {

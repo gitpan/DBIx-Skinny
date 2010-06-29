@@ -1,7 +1,16 @@
 Revision history for Perl extension DBIx::Skinny
 
+0.0712
+   2010-06-29
+        - MOD : added method search_rs. Return DBIx::Skinny::SQL's object. (thanks walf443)
+        - MOD : add fork safe dbh handling (thanks nihen)
+        - ADD : DBIx::Skinny::SQL's docs (thanks walf443)
+        - ADD : add_complex_where's test (thanks walf443)
+        - ADD : DBIx::Skinny::Manual::EN (thanks metaperl)
+        - FIXED : t/218_transaction_mysql.t's typo (thanks nihen)
+
 0.0711
-   2010-XX-XX
+   2010-05-16
         - FIXED : typo s/realy/really/ (thanks azumakuniyuki)
         - FIXED : typo s/potition/position/g (thanks azumakuniyuki)
         - FIXED : bind_param bug fixed.
