@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0714';
+our $VERSION = '0.0715';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -311,11 +311,11 @@ sub call_schema_trigger {
 
 #--------------------------------------------------------------------------------
 sub do {
-    my ($class, $sql) = @_;
-    $class->profiler($sql);
-    eval { $class->dbh->do($sql) };
+    my ($class, $sql, $attr, @bind_vars) = @_;
+    $class->profiler($sql, @bind_vars ? \@bind_vars : undef);
+    eval { $class->dbh->do($sql, $attr, @bind_vars) };
     if ($@) {
-        $class->_stack_trace('', $sql, '', $@);
+        $class->_stack_trace('', $sql, @bind_vars ? \@bind_vars : '', $@);
     }
 }
 
@@ -394,6 +394,8 @@ sub search_rs {
             $rs->add_having($col => $terms->{$col});
         }
     }
+
+    $rs->for_update(1) if $opt->{for_update};
 
     return $rs;
 }
