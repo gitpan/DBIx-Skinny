@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0715';
+our $VERSION = '0.0716';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -492,7 +492,7 @@ sub _mk_anon_row_class {
 sub _guess_table_name {
     my ($class, $sql) = @_;
 
-    if ($sql =~ /^.+from\s+([\w]+)\s*/i) {
+    if ($sql =~ /\sfrom\s+([\w]+)\s*/si) {
         return $1;
     }
     return;
@@ -1176,6 +1176,8 @@ magicalhat
 
 Makamaka Hannyaharamitu
 
+nihen: Masahiro Chiba
+
 =head1 SUPPORT
 
   irc: #dbix-skinny@irc.perl.org
@@ -1188,7 +1190,7 @@ Makamaka Hannyaharamitu
 
 =head1 LICENCE AND COPYRIGHT
 
-Copyright (c) 2009, Atsushi Kobayashi C<< <nekokak __at__ gmail.com> >>. All rights reserved.
+Copyright (c) 2010, Atsushi Kobayashi C<< <nekokak __at__ gmail.com> >>. All rights reserved.
 
 This module is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself. See L<perlartistic>.
