@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0720';
+our $VERSION = '0.0721';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -846,7 +846,7 @@ in your execute script.
     $row->update({name => 'nekokak'});
 
     $row = Your::Model->search_by_sql(q{SELECT id, name FROM user WHERE id = ?}, [ 1 ]);
-    $row->delete('user')
+    $row->delete('user');
 
 =head1 DESCRIPTION
 
@@ -858,7 +858,7 @@ The Row objects is generated based on arbitrarily SQL.
 
 DBIx::Skinny provides a number of methods to all your classes, 
 
-=over4
+=over
 
 =item $skinny->new([\%connection_info])
 
@@ -1162,9 +1162,11 @@ re connect database handle.
 
 If you give \%connection_info, create new database connection.
 
-=over4
+=back
 
 =head1 ATTRIBUTES
+
+=over
 
 =item order_by
 
@@ -1177,6 +1179,24 @@ If you give \%connection_info, create new database connection.
 =item for_update
 
     { for_update => 1 }
+
+=back
+
+=head1 SKINNY_PROFILE
+
+for debugging sql.
+
+see L<DBIx::Skinny::Profile>
+
+        $ SKINNY_PROFILE=1 perl ./your_script.pl
+
+=head1 SKINNY_TRACE
+
+for debugging sql.
+
+see L<DBIx::Skinny::Profiler::Trace>
+
+    $ SKINNY_TRACE=1 perl ./your_script.pl
 
 =head1 BUGS AND LIMITATIONS
 

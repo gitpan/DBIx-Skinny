@@ -4,6 +4,10 @@ author:
   - 'Atsushi Kobayashi  C<< <nekokak __at__ gmail.com> >>'
 build_requires:
   ExtUtils::MakeMaker: 6.42
+  Test::Exception: 0
+  Test::More: 0.94
+  Test::Output: 0
+  Test::SharedFork: 0.15
 configure_requires:
   ExtUtils::MakeMaker: 6.42
 distribution_type: module
@@ -28,4 +32,4 @@ requires:
 resources:
   license: http://dev.perl.org/licenses/
   repository: git://github.com/nekokak/p5-dbix-skinny.git
-version: 0.0720
+version: 0.0721
