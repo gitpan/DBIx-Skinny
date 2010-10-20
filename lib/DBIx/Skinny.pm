@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0721';
+our $VERSION = '0.0722';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -39,6 +39,7 @@ sub import {
         klass           => $caller,
         row_class_map   => +{},
         active_transaction => 0,
+        suppress_row_objects => 0,
         last_pid => $$,
     };
 
@@ -50,7 +51,7 @@ sub import {
             new
             schema profiler
             dbh dbd connect connect_info _dbd_type reconnect set_dbh setup_dbd do_on_connect
-            call_schema_trigger bind_params
+            call_schema_trigger bind_params suppress_row_objects
             do resultset search search_rs single search_by_sql search_named count
             data2itr find_or_new
                 _get_sth_iterator _mk_row_class _camelize _mk_anon_row_class _guess_table_name
@@ -145,6 +146,12 @@ sub profiler {
         $attr->{profiler}->record_query($sql, $bind);
     }
     return $attr->{profiler};
+}
+
+sub suppress_row_objects {
+    my ($class, $mode) = @_;
+    return $class->attribute->{suppress_row_objects} unless defined $mode;
+    $class->attribute->{suppress_row_objects} = $mode;
 }
 
 #--------------------------------------------------------------------------------
@@ -450,7 +457,8 @@ sub _get_sth_iterator {
         skinny         => $class,
         sth            => $sth,
         row_class      => $class->_mk_row_class($sql, $opt_table_info),
-        opt_table_info => $opt_table_info
+        opt_table_info => $opt_table_info,
+        suppress_objects => $class->suppress_row_objects,
     );
 }
 
@@ -462,6 +470,7 @@ sub data2itr {
         data           => $data,
         row_class      => $class->_mk_row_class($table.$data, $table),
         opt_table_info => $table,
+        suppress_objects => $class->suppress_row_objects,
     );
 }
 
@@ -551,11 +560,13 @@ sub bind_params {
         my $type = $schema->column_type($table, $col);
         my $attr = $type ? $dbd->bind_param_attributes($type) : undef;
 
-        if (ref $val) {
+        my $ref = ref $val;
+        if ($ref eq 'ARRAY') {
             $sth->bind_param($i++, $_, $attr) for @$val;
-        }
-        else {
+        } elsif (not $ref) {
             $sth->bind_param($i++, $val, $attr);
+        } else {
+            die "you can't set bind value, arrayref or scalar. you set $ref ref value.";
         }
     }
 }
@@ -751,7 +762,7 @@ sub _execute {
 
     my ($sth, $bind);
     if ($table) {
-        $bind = [map {ref $_->[1] ? @{$_->[1]} : $_->[1]} @$args];
+        $bind = [map {(ref $_->[1]) eq 'ARRAY' ? @{$_->[1]} : $_->[1]} @$args];
         $class->profiler($stmt, $bind);
         eval {
             $sth = $class->dbh->prepare($stmt);
@@ -1162,6 +1173,10 @@ re connect database handle.
 
 If you give \%connection_info, create new database connection.
 
+=item $skinny->suppress_row_objects($flag)
+
+set row object creation mode.
+
 =back
 
 =head1 ATTRIBUTES
@@ -1182,7 +1197,9 @@ If you give \%connection_info, create new database connection.
 
 =back
 
-=head1 SKINNY_PROFILE
+=head1 ENVIRONMENT VARIABLES
+
+=head2 SKINNY_PROFILE
 
 for debugging sql.
 
@@ -1190,7 +1207,7 @@ see L<DBIx::Skinny::Profile>
 
         $ SKINNY_PROFILE=1 perl ./your_script.pl
 
-=head1 SKINNY_TRACE
+=head2 SKINNY_TRACE
 
 for debugging sql.
 
