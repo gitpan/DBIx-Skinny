@@ -2,14 +2,12 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0724';
+our $VERSION = '0.0725';
 
 use DBI;
 use DBIx::Skinny::Iterator;
 use DBIx::Skinny::DBD;
 use DBIx::Skinny::Row;
-use DBIx::Skinny::Profiler;
-use DBIx::Skinny::Profiler::Trace;
 use DBIx::Skinny::Transaction;
 use Digest::SHA1 ();
 use Carp ();
@@ -18,24 +16,45 @@ use Storable ();
 sub import {
     my ($class, %opt) = @_;
 
+    return if $class ne 'DBIx::Skinny';
+
     my $caller = caller;
-    my $args   = $opt{setup}||+{};
+    my $connect_info = $opt{connect_info};
+    if (! $connect_info ) {
+        if ( $connect_info = $opt{setup} ) {
+            Carp::carp( "use DBIx::Skinny setup => { ... } has been deprecated. Please use connect_info instead" );
+        } else {
+            $connect_info = {};
+        }
+    }
 
-    my $schema = "$caller\::Schema";
+    my $profiler = $opt{profiler};
+    if (! $profiler ) {
+        if ( $profiler = $connect_info->{profiler} ) {
+            Carp::carp( "use DBIx::Skinny connect_info => { profiler => ... } has been deprecated. Please use use DBIx::Skinny profiler => ... instead" );
+        } elsif ($ENV{SKINNY_TRACE}) {
+            require DBIx::Skinny::Profiler::Trace;
+            $profiler = DBIx::Skinny::Profiler::Trace->new;
+        } elsif ($ENV{SKINNY_PROFILE}) {
+            require DBIx::Skinny::Profiler;
+            $profiler = DBIx::Skinny::Profiler->new;
+        }
+    }
+                
+    my $schema = $opt{schema} || "$caller\::Schema";
 
-    my $dbd_type = _dbd_type($args);
+    my $dbd_type = _dbd_type($connect_info);
     my $_attribute = +{
-        check_schema    => defined $args->{check_schema} ? $args->{check_schema} : 1,
-        dsn             => $args->{dsn},
-        username        => $args->{username},
-        password        => $args->{password},
-        connect_options => $args->{connect_options},
-        on_connect_do   => $args->{on_connect_do},
-        dbh             => $args->{dbh}||undef,
+        check_schema    => defined $connect_info->{check_schema} ? $connect_info->{check_schema} : 1,
+        dsn             => $connect_info->{dsn},
+        username        => $connect_info->{username},
+        password        => $connect_info->{password},
+        connect_options => $connect_info->{connect_options},
+        on_connect_do   => $connect_info->{on_connect_do},
+        dbh             => $connect_info->{dbh}||undef,
         dbd             => $dbd_type ? DBIx::Skinny::DBD->new($dbd_type) : undef,
         schema          => $schema,
-        profiler        => ( $args->{profiler} || ( $ENV{SKINNY_TRACE} ? DBIx::Skinny::Profiler::Trace->new : DBIx::Skinny::Profiler->new ) ),
-        profile         => $ENV{SKINNY_PROFILE}||$ENV{SKINNY_TRACE}||0,
+        profiler        => $profiler,
         klass           => $caller,
         row_class_map   => +{},
         active_transaction => 0,
@@ -45,25 +64,8 @@ sub import {
 
     {
         no strict 'refs';
+        push @{"${caller}::ISA"}, $class;
         *{"$caller\::attribute"} = sub { ref $_[0] ? $_[0] : $_attribute };
-
-        my @functions = qw/
-            new
-            schema profiler
-            dbh dbd connect connect_info _dbd_type reconnect set_dbh setup_dbd do_on_connect
-            call_schema_trigger bind_params suppress_row_objects
-            do resultset search search_rs single search_by_sql search_named count
-            data2itr find_or_new
-                _get_sth_iterator _mk_row_class _camelize _mk_anon_row_class _guess_table_name
-            insert replace _insert_or_replace bulk_insert create update delete find_or_create find_or_insert
-            update_by_sql delete_by_sql
-                _add_where
-            _execute _close_sth _stack_trace
-            txn_scope txn_begin txn_rollback txn_commit txn_end
-        /;
-        for my $func (@functions) {
-            *{"$caller\::$func"} = \&$func;
-        }
     }
 
     eval "use $schema"; ## no critic
@@ -142,7 +144,7 @@ sub schema {
 sub profiler {
     my ($class, $sql, $bind) = @_;
     my $attr = $class->attribute;
-    if ($attr->{profile} && $sql) {
+    if ($attr->{profiler} && $sql) {
         $attr->{profiler}->record_query($sql, $bind);
     }
     return $attr->{profiler};
@@ -599,8 +601,12 @@ sub _insert_or_replace {
     my $sth = $class->_execute($sql, \@column_list, $table);
 
     my $pk = $class->schema->schema_info->{$table}->{pk};
-    my $id = defined $args->{$pk} ? $args->{$pk} :
-             (ref $pk) eq 'ARRAY' ? undef        : $dbd->last_insert_id($class->dbh, $sth, { table => $table });
+    my $id =
+        defined $pk && defined $args->{$pk} ? $args->{$pk} :
+        defined $pk && (ref $pk) eq 'ARRAY' ? undef        :
+            $dbd->last_insert_id($class->dbh, $sth, { table => $table })
+    ;
+
     $class->_close_sth($sth);
 
     if ($id) {
@@ -831,7 +837,7 @@ DBIx::Skinny - simple DBI wrapper/ORMapper
 create your db model base class.
 
     package Your::Model;
-    use DBIx::Skinny setup => {
+    use DBIx::Skinny connect_info => {
         dsn => 'dbi:SQLite:',
         username => '',
         password => '',
@@ -871,8 +877,51 @@ in your execute script.
 =head1 DESCRIPTION
 
 DBIx::Skinny is simple DBI wrapper and simple O/R Mapper.
-Lightweight and Little dependence ORM.
-The Row objects is generated based on arbitrarily SQL. 
+It aims to be lightweight, with minimal dependencies so it's easier to install. 
+
+=head1 ARCHITECTURE
+
+DBIx::Skinny classes are comprised of three distinct components:
+
+=head2 MODEL
+
+The C<model> is where you say 
+
+    package MyApp::Model;
+    use DBIx::Skinny;
+
+This is the entry point to using DBIx::Skinny. You connect, insert, update, delete, select stuff using this object.
+
+=head2 SCHEMA
+
+The C<schema> is a simple class that describes your table definitions. Note that this is different from DBIx::Class terms. DBIC's schema is equivalent to DBIx::Skinny's model + schema, where the actual schema information is scattered across the result classes.
+
+In DBIx::Skinny, you simply use DBIx::Skinny::Schema's domain specific languaage to define a set of tables
+
+    package MyApp::Model::Schema;
+    use DBIx::Skinny::Schema;
+
+    install_table $table_name => schema {
+        pk $primary_key_column;
+        columns qw(
+            column1
+            column2
+            column3
+        );
+    }
+
+    ... and other tables ...
+
+=head2 ROW
+
+Unlike DBIx::Class, you don't need to have a set of classes that represent a row type (i.e. "result" classes in DBIC terms). In DBIx::Skinny, the row objects are blessed into anonymous classes that inherit from DBIx::Skinny::Row, so you don't have to create these classes if you just want to use some simple queries.
+
+If you want to define methods to be performed by your row objects, simply create a row class like so:
+
+    package MyApp::Model::Row::CamelizedTableName;
+    use base qw(DBIx::Skinny::Row);
+
+Note that your table name will be camelized using String::CamelCase.
 
 =head1 METHODS
 
@@ -1251,6 +1300,8 @@ magicalhat
 Makamaka Hannyaharamitu
 
 nihen: Masahiro Chiba
+
+lestrrat: Daisuke Maki
 
 =head1 SUPPORT
 

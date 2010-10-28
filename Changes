@@ -1,5 +1,15 @@
 Revision history for Perl extension DBIx::Skinny
 
+0.0725
+   2010-10-28
+        - ADD   : add handle method for DBIx::Skinny::Row.
+        - MOD   : DBIx::Skinny did inherits without doing export.
+        - FIXED : don't warn on pk-less tables.(thanks lestrrat)
+        - MOD   : allow setting the name of the schema at use DBIx::Skinny time (thanks lestrrat)
+        - MOD   : change setup to connect_info. setup now warns, and is aliased to connect_info (thanks lestrrat)
+        - MOD   : change where profiler is set, also now respect SKINNY_PROFILE env var (thanks lestrrat)
+        - ADD   : add ARCHITECTURE document.(thanks lestrrat)
+
 0.0724
    2010-10-26
         - FIXED : find_or_create multi pk bug (thanks tokuhirom)
