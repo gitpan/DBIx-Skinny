@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0725';
+our $VERSION = '0.0726';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -133,7 +133,7 @@ sub schema {
         do {
             no strict 'refs';
             unless ( defined *{"@{[ $schema ]}::schema_info"} ) {
-                die "$schema is something wrong( is it really loaded? )";
+                die "Cannot use schema $schema ( is it really loaded? )";
             }
         };
         $schema_checked++;
@@ -247,7 +247,7 @@ sub connect {
 
 sub reconnect {
     my $class = shift;
-    $class->attribute->{dbh} = undef;
+    $class->disconnect();
     $class->connect(@_);
 }
 
@@ -264,6 +264,11 @@ sub do_on_connect {
     } else {
         Carp::croak('Invalid on_connect_do: '.ref($on_connect_do));
     }
+}
+
+sub disconnect {
+    my $class = shift;
+    $class->attribute->{dbh} = undef;
 }
 
 sub set_dbh {
@@ -614,6 +619,8 @@ sub _insert_or_replace {
     }
 
     my $row_class = $class->_mk_row_class($sql, $table);
+    return $args if $class->suppress_row_objects;
+
     my $obj = $row_class->new(
         {
             row_data       => $args,
@@ -760,7 +767,7 @@ sub find_or_create {
             $args{$_} = $row->get_column($_);
         }
     } else {
-        $args{$pk} = $row->get_column($pk);
+        $args{$pk} = $class->suppress_row_objects ? $row->{$pk} :$row->get_column($pk);
     }
     $class->single($table, \%args);
 }
@@ -1230,6 +1237,10 @@ If you give \%connection_info, create new database connection.
 re connect database handle.
 
 If you give \%connection_info, create new database connection.
+
+=item $skinny->disconnect()
+
+Disconnects from the currently connected database.
 
 =item $skinny->suppress_row_objects($flag)
 
