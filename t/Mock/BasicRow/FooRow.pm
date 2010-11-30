@@ -1,7 +1,5 @@
-package Mock::AutoRowClass::Row::MockFoo;
+package Mock::BasicRow::FooRow;
 use strict;
 use warnings;
 use base 'DBIx::Skinny::Row';
-
-sub say {'hoo'}
 1;

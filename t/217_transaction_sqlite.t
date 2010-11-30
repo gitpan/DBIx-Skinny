@@ -80,6 +80,7 @@ subtest 'do scope rollback' => sub {
 subtest 'do scope guard for rollback' => sub {
  
     {
+        local $SIG{__WARN__} = sub {};
         my $txn = Mock::Basic->txn_scope;
         my $row = Mock::Basic->insert('mock_basic',{
             name => 'perl',
@@ -191,8 +192,10 @@ subtest 'do nested scope commit-commit' => sub {
 };
 
 subtest 'do nested scope rollback-commit-rollback' => sub {
+
     my $txn = Mock::Basic->txn_scope;
     {
+        local $SIG{__WARN__} = sub {};
         my $txn2 = Mock::Basic->txn_scope;
         my $row2 = Mock::Basic->insert('mock_basic',{
             name => 'perl5.10',
@@ -211,6 +214,7 @@ subtest 'do nested scope rollback-commit-rollback' => sub {
 
         eval { $txn2->commit };
         like( $@, qr/tried to commit but already rollbacked in nested transaction./, "error message" );
+
     }
     my $row = Mock::Basic->insert('mock_basic',{
         name => 'perl5.12',
@@ -229,6 +233,7 @@ subtest 'do nested scope rollback-commit-rollback' => sub {
 subtest 'do nested scope rollback-commit-commit' => sub {
     my $txn = Mock::Basic->txn_scope;
     {
+        local $SIG{__WARN__} = sub {};
         my $txn2 = Mock::Basic->txn_scope;
         my $row2 = Mock::Basic->insert('mock_basic',{
             name => 'perl5.10',

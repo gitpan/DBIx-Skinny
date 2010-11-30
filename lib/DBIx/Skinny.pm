@@ -2,14 +2,13 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0727';
+our $VERSION = '0.0728';
 
 use DBI;
 use DBIx::Skinny::Iterator;
 use DBIx::Skinny::DBD;
 use DBIx::Skinny::Row;
 use DBIx::Skinny::Transaction;
-use Digest::SHA1 ();
 use Carp ();
 use Storable ();
 
@@ -74,18 +73,6 @@ sub import {
         # accept schema class declaration within base class.
         (my $schema_file = $schema) =~ s|::|/|g;
         die $@ if $@ && $@ !~ /Can't locate $schema_file\.pm in \@INC/;
-    }
-
-    if ($opt{auto_row_class}) {
-        my $schema_info = $schema->schema_info;
-        for my $table (keys %$schema_info) {
-            my $row_class = join '::', $caller, 'Row', _camelize($table);
-
-            eval "use $row_class"; ## no critic
-            if ($@) { no strict 'refs'; @{"$row_class\::ISA"} = ('DBIx::Skinny::Row') };
-
-            $_attributes->{row_class_map}->{$table} = $row_class;
-        }
     }
 
     strict->import;
@@ -226,13 +213,25 @@ sub connect_info {
     my ($class, $connect_info) = @_;
 
     my $attr = $class->_attributes;
-    $attr->{dsn} = $connect_info->{dsn};
-    $attr->{username} = $connect_info->{username};
-    $attr->{password} = $connect_info->{password};
-    $attr->{connect_options} = $connect_info->{connect_options};
 
-    $class->setup_dbd($connect_info);
+    if ($connect_info) {
+        $attr->{dsn} = $connect_info->{dsn};
+        $attr->{username} = $connect_info->{username};
+        $attr->{password} = $connect_info->{password};
+        $attr->{connect_options} = $connect_info->{connect_options};
+
+        $class->setup_dbd($connect_info);
+        return;
+    } else {
+        return +{
+            dsn             => $attr->{dsn},
+            username        => $attr->{username},
+            password        => $attr->{password},
+            connect_options => $attr->{connect_options},
+        };
+    }
 }
+
 
 sub connect {
     my $class = shift;
@@ -340,10 +339,12 @@ sub call_schema_trigger {
 sub do {
     my ($class, $sql, $attr, @bind_vars) = @_;
     $class->profiler($sql, @bind_vars ? \@bind_vars : undef);
-    eval { $class->dbh->do($sql, $attr, @bind_vars) };
+    my $ret;
+    eval { $ret = $class->dbh->do($sql, $attr, @bind_vars) };
     if ($@) {
         $class->_stack_trace('', $sql, @bind_vars ? \@bind_vars : '', $@);
     }
+    $ret;
 }
 
 sub count {
@@ -511,30 +512,6 @@ sub data2itr {
     );
 }
 
-sub _mk_anon_row_class {
-    my ($class, $key) = @_;
-
-    my $row_class = 'DBIx::Skinny::Row::C';
-    $row_class .= Digest::SHA1::sha1_hex($key);
-
-    my $attr = $class->_attributes;
-    $attr->{base_row_class} ||= do {
-        my $tmp_base_row_class = join '::', $attr->{klass}, 'Row';
-        eval "use $tmp_base_row_class"; ## no critic
-        (my $rc = $tmp_base_row_class) =~ s|::|/|g;
-        die $@ if $@ && $@ !~ /Can't locate $rc\.pm in \@INC/;
-
-        if ($@) {
-            'DBIx::Skinny::Row';
-        } else {
-            $tmp_base_row_class;
-        }
-    };
-    { no strict 'refs'; @{"$row_class\::ISA"} = ($attr->{base_row_class}); }
-
-    return $row_class;
-}
-
 sub _guess_table_name {
     my ($class, $sql) = @_;
 
@@ -551,26 +528,33 @@ sub _mk_row_class {
     my $attr = $class->_attributes;
     my $base_row_class = $attr->{row_class_map}->{$table}||'';
 
-    if ( $base_row_class eq 'DBIx::Skinny::Row' ) {
-        return $class->_mk_anon_row_class($key);
-    } elsif ($base_row_class) {
+    if ($base_row_class) {
         return $base_row_class;
     } elsif ($table) {
-        my $tmp_base_row_class = join '::', $attr->{klass}, 'Row', _camelize($table);
-        eval "use $tmp_base_row_class"; ## no critic
-        (my $rc = $tmp_base_row_class) =~ s|::|/|g;
+        my $row_class = $class->schema->schema_info->{$table}->{row_class} ||
+                        join '::', $attr->{klass}, 'Row', _camelize($table);
+        eval "use $row_class"; ## no critic
+        (my $rc = $row_class) =~ s|::|/|g;
         die $@ if $@ && $@ !~ /Can't locate $rc\.pm in \@INC/;
 
         if ($@) {
-            $attr->{row_class_map}->{$table} = 'DBIx::Skinny::Row';
-            return $class->_mk_anon_row_class($key);
-        } else {
-            $attr->{row_class_map}->{$table} = $tmp_base_row_class;
-            return $tmp_base_row_class;
+            $row_class = $class->_mk_common_row;
         }
+        return $attr->{row_class_map}->{$table} = $row_class;
     } else {
-        return $class->_mk_anon_row_class($key);
+        return $class->_make_row_class;
     }
+}
+
+sub _mk_common_row {
+    my $class = shift;
+
+    my $row_class = join '::', $class->_attributes->{klass}, 'Row';
+    eval "use $row_class"; ## no critic
+    (my $rc = $row_class) =~ s|::|/|g;
+    die $@ if $@ && $@ !~ /Can't locate $rc\.pm in \@INC/;
+    if ($@) { no strict 'refs'; @{"$row_class\::ISA"} = ('DBIx::Skinny::Row') };
+    $row_class;
 }
 
 sub _camelize {
@@ -608,6 +592,29 @@ sub bind_params {
     }
 }
 
+sub _set_columns {
+    my ($class, $args, $insert) = @_;
+
+    my $schema = $class->schema;
+    my $dbd = $class->dbd;
+    my $quote = $dbd->quote;
+    my $name_sep = $dbd->name_sep;
+
+    my (@columns, @bind_columns, @quoted_columns);
+    for my $col (keys %{ $args }) {
+        my $quoted_col = _quote($col, $quote, $name_sep);
+        if (ref($args->{$col}) eq 'SCALAR') {
+            push @columns, ($insert ? ${ $args->{$col} } :"$quoted_col = " . ${ $args->{$col} });
+        } else {
+            push @columns, ($insert ? '?' : "$quoted_col = ?");
+            push @bind_columns, [$col, $schema->utf8_off($col, $args->{$col})];
+        }
+        push @quoted_columns, $quoted_col;
+    }
+
+    return (\@columns, \@bind_columns, \@quoted_columns);
+}
+
 sub _insert_or_replace {
     my ($class, $is_replace, $table, $args) = @_;
 
@@ -618,27 +625,20 @@ sub _insert_or_replace {
         $args->{$col} = $schema->call_deflate($col, $args->{$col});
     }
 
-    my (@cols, @column_list);
-    for my $col (keys %{ $args }) {
-        push @cols, $col;
-        push @column_list, [$col, $schema->utf8_off($col, $args->{$col})];
-    }
+    my ($columns, $bind_columns, $quoted_columns) = $class->_set_columns($args, 1);
 
-    my $dbd = $class->dbd;
-    my $quote = $dbd->quote;
-    my $name_sep = $dbd->name_sep;
     my $sql = $is_replace ? 'REPLACE' : 'INSERT';
     $sql .= " INTO $table\n";
-    $sql .= '(' . join(', ', map {_quote($_, $quote, $name_sep)} @cols) . ')' . "\n" .
-            'VALUES (' . join(', ', ('?') x @cols) . ')' . "\n";
+    $sql .= '(' . join(', ', @$quoted_columns) .')' . "\n" .
+            'VALUES (' . join(', ', @$columns) . ')' . "\n";
 
-    my $sth = $class->_execute($sql, \@column_list, $table);
+    my $sth = $class->_execute($sql, $bind_columns, $table);
 
     my $pk = $class->schema->schema_info->{$table}->{pk};
     my $id =
         defined $pk && defined $args->{$pk} ? $args->{$pk} :
         defined $pk && (ref $pk) eq 'ARRAY' ? undef        :
-            $dbd->last_insert_id($class->dbh, $sth, { table => $table })
+            $class->dbd->last_insert_id($class->dbh, $sth, { table => $table })
     ;
 
     $class->_close_sth($sth);
@@ -702,33 +702,22 @@ sub update {
     my $schema = $class->schema;
     $class->call_schema_trigger('pre_update', $schema, $table, $args);
 
-    # deflate
     my $values = {};
     for my $col (keys %{$args}) {
-        $values->{$col} = $schema->call_deflate($col, $args->{$col});
+       $values->{$col} = $schema->call_deflate($col, $args->{$col});
     }
 
-    my $quote = $class->dbd->quote;
-    my $name_sep = $class->dbd->name_sep;
-    my (@set, @column_list);
-    for my $col (keys %{ $args }) {
-        my $quoted_col = _quote($col, $quote, $name_sep);
-        if (ref($values->{$col}) eq 'SCALAR') {
-            push @set, "$quoted_col = " . ${ $values->{$col} };
-        } else {
-            push @set, "$quoted_col = ?";
-            push @column_list, [$col, $schema->utf8_off($col, $values->{$col})];
-        }
-    }
+    my ($columns, $bind_columns, undef) = $class->_set_columns($values, 0);
 
     my $stmt = $class->resultset;
     $class->_add_where($stmt, $where);
     my @where_values = map {[$_ => $stmt->where_values->{$_}]} @{$stmt->bind_col};
-    push @column_list, @where_values;
 
-    my $sql = "UPDATE $table SET " . join(', ', @set) . ' ' . $stmt->as_sql_where;
+    push @{$bind_columns}, @where_values;
 
-    my $sth = $class->_execute($sql, \@column_list, $table);
+    my $sql = "UPDATE $table SET " . join(', ', @$columns) . ' ' . $stmt->as_sql_where;
+    my $sth = $class->_execute($sql, $bind_columns, $table);
+
     my $rows = $sth->rows;
 
     $class->_close_sth($sth);
@@ -740,11 +729,8 @@ sub update {
 sub update_by_sql {
     my ($class, $sql, $bind) = @_;
 
-    my $sth = $class->_execute($sql, $bind);
-    my $rows = $sth->rows;
-    $class->_close_sth($sth);
-
-    $rows;
+    Carp::carp( 'update_by_sql has been deprecated. Please use $skinny->do($sql, undef, @bind)' );
+    $class->do($sql, undef, @$bind);
 }
 
 sub delete {
@@ -775,12 +761,8 @@ sub delete {
 sub delete_by_sql {
     my ($class, $sql, $bind) = @_;
 
-    my $sth = $class->_execute($sql, $bind);
-    my $rows = $sth->rows;
-
-    $class->_close_sth($sth);
-
-    $rows;
+    Carp::carp( 'delete_by_sql has been deprecated. Please use $skinny->do($sql, undef, @bind)' );
+    $class->do($sql, undef, @$bind);
 }
 
 *find_or_insert = \*find_or_create;
@@ -1015,6 +997,25 @@ or
 
 insert method alias.
 
+=item $skinny->replace($table_name, \%row_data)
+
+The data that already exists is replaced. 
+
+example:
+
+    Your::Model->replace('user',{
+        id   => 1,
+        name => 'tokuhirom',
+    });
+
+or 
+
+    my $db = Your::Model->new;
+    my $row = $db->replace('user',{
+        id   => 1,
+        name => 'tokuhirom',
+    });
+
 =item $skinny->bulk_insert($table_name, \@rows_data)
 
 Accepts either an arrayref of hashrefs.
@@ -1209,9 +1210,22 @@ get transaction scope object.
 
     do {
         my $txn = Your::Model->txn_scope;
-        # some process
+
+        $row->update({foo => 'bar'});
+
         $txn->commit;
     }
+
+An alternative way of transaction handling based on
+L<DBIx::Skinny::Transaction>.
+
+If an exception occurs, or the guard object otherwise leaves the scope
+before C<< $txn->commit >> is called, the transaction will be rolled
+back by an explicit L</txn_rollback> call. In essence this is akin to
+using a L</txn_begin>/L</txn_commit> pair, without having to worry
+about calling L</txn_rollback> at the right places. Note that since there
+is no defined code closure, there will be no retries and other magic upon
+database disconnection.
 
 =item $skinny->hash_to_row($table_name, $row_data_hash_ref)
 
@@ -1369,6 +1383,8 @@ Makamaka Hannyaharamitu
 nihen: Masahiro Chiba
 
 lestrrat: Daisuke Maki
+
+tokuhirom: Tokuhiro Matsuno
 
 =head1 SUPPORT
 
