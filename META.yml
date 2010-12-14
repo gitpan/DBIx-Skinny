@@ -4,9 +4,10 @@ author:
   - 'Atsushi Kobayashi  C<< <nekokak __at__ gmail.com> >>'
 build_requires:
   ExtUtils::MakeMaker: 6.42
-  Test::Exception: 0
-  Test::More: 0.94
+  Test::More: 0.96
   Test::SharedFork: 0.15
+  Test::mysqld: 0
+  Test::postgresql: 0
 configure_requires:
   ExtUtils::MakeMaker: 6.42
 distribution_type: module
@@ -24,7 +25,9 @@ no_index:
 requires:
   Carp: 0
   Class::Accessor::Lite: 0
+  Class::Load: 0
   DBI: 0
+  DBIx::TransactionManager: 1.02
   IO::Handle: 0
   Scalar::Util: 0
   Try::Tiny: 0
@@ -32,4 +35,4 @@ requires:
 resources:
   license: http://dev.perl.org/licenses/
   repository: git://github.com/nekokak/p5-dbix-skinny.git
-version: 0.0729
+version: 0.0730

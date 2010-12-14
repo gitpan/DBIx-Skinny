@@ -1,10 +1,11 @@
 package DBIx::Skinny::Row;
 use strict;
 use warnings;
-use Carp qw//;
+use Carp ();
 
 sub new {
     my ($class, $args) = @_;
+
     my $self = bless {%$args}, $class;
     $self->{select_columns} = [keys %{$self->{row_data}}];
     return $self;
@@ -31,6 +32,9 @@ sub _lazy_get_data {
     return sub {
         my $self = shift;
 
+        if ($self->{_untrusted_row_data}->{$col}) {
+            Carp::carp("${col}'s row data is untrusted. by your update query.");
+        }
         unless ( $self->{_get_column_cached}->{$col} ) {
           my $data = $self->get_column($col);
           $self->{_get_column_cached}->{$col} = $self->{skinny}->schema->call_inflate($col, $data);
@@ -63,46 +67,73 @@ sub get_columns {
     return \%data;
 }
 
-sub set {
-    my ($self, $args) = @_;
+sub set_column {
+    my ($self, $col, $val) = @_;
 
-    for my $col (keys %$args) {
-        $self->{row_data}->{$col} = $self->{skinny}->schema->call_deflate($col, $args->{$col});
-        $self->{_get_column_cached}->{$col} = $args->{$col};
+    if (ref($val) eq 'SCALAR') {
+        $self->{_untrusted_row_data}->{$col} = 1;
+    } else {
+        $self->{row_data}->{$col} = $self->{skinny}->schema->call_deflate($col, $val);
+        $self->{_get_column_cached}->{$col} = $val;
         $self->{_dirty_columns}->{$col} = 1;
     }
 }
 
+sub set_columns {
+    my ($self, $args) = @_;
+
+    for my $col (keys %$args) {
+        $self->set_column($col, $args->{$col});
+    }
+}
+
+sub set {
+    my $self = shift;
+    Carp::carp( "set method has been deprecated. Please use set_columns or set_column method instead" );
+    $self->set_columns(@_);
+}
+
 sub get_dirty_columns {
     my $self = shift;
+
     my %rows = map {$_ => $self->get_column($_)}
                keys %{$self->{_dirty_columns}};
+
     return \%rows;
 }
 
 sub insert {
     my $self = shift;
+
     $self->{skinny}->find_or_create($self->{opt_table_info}, $self->get_columns);
 }
 
 sub update {
     my ($self, $args, $table) = @_;
+
     $table ||= $self->{opt_table_info};
     $args ||= $self->get_dirty_columns;
-    my $where = $self->_update_or_delete_cond($table);
-    my $result = $self->{skinny}->update($table, $args, $where);
-    $self->set($args);
+
+    my $result = $self->{skinny}->update($table, $args, $self->_where_cond($table));
+    $self->set_columns($args);
+
     return $result;
 }
 
 sub delete {
     my ($self, $table) = @_;
+
     $table ||= $self->{opt_table_info};
-    my $where = $self->_update_or_delete_cond($table);
-    $self->{skinny}->delete($table, $where);
+    $self->{skinny}->delete($table, $self->_where_cond($table));
 }
 
-sub _update_or_delete_cond {
+sub refetch {
+    my ($self, $table) = @_;
+    $table ||= $self->{opt_table_info};
+    $self->{skinny}->single($table, $self->_where_cond($table));
+}
+
+sub _where_cond {
     my ($self, $table) = @_;
 
     unless ($table) {
@@ -161,11 +192,23 @@ get a column value from a row object.
 
 Does C<get_column>, for all column values.
 
-=item $row->set(\%new_row_data)
+=item $row->set(\%new_row_data)  # has been deprecated
 
     $row->set({$col => $val});
 
 set columns data.
+
+=item $row->set_columns(\%new_row_data)
+
+    $row->set_columns({$col => $val});
+
+set columns data.
+
+=item $row->set_column($col => $val)
+
+    $row->set_column($col => $val);
+
+set column data.
 
 =item $row->get_dirty_columns
 
@@ -191,6 +234,13 @@ It works by schema in which primary key exists.
 delete is executed for instance record.
 
 It works by schema in which primary key exists.
+
+=item my $refetched_row = $row->refetch($table_name);
+
+$table_name is optional.
+
+refetch record from database. get new row object.
+
 
 =item $row->handle
 

@@ -2,15 +2,16 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0729';
+our $VERSION = '0.0730';
 
 use DBI;
 use DBIx::Skinny::Iterator;
 use DBIx::Skinny::DBD;
 use DBIx::Skinny::Row;
-use DBIx::Skinny::Transaction;
+use DBIx::TransactionManager 1.02;
 use Carp ();
 use Storable ();
+use Class::Load ();
 
 sub import {
     my ($class, %opt) = @_;
@@ -42,7 +43,7 @@ sub import {
                 
     my $schema = $opt{schema} || "$caller\::Schema";
 
-    my $dbd_type = _dbd_type($connect_info);
+    my $driver_name = _guess_driver_name($connect_info);
     my $_attributes = +{
         check_schema    => defined $connect_info->{check_schema} ? $connect_info->{check_schema} : 1,
         dsn             => $connect_info->{dsn},
@@ -51,7 +52,7 @@ sub import {
         connect_options => $connect_info->{connect_options},
         on_connect_do   => $connect_info->{on_connect_do},
         dbh             => $connect_info->{dbh}||undef,
-        dbd             => $dbd_type ? DBIx::Skinny::DBD->new($dbd_type) : undef,
+        driver_name     => $driver_name,
         schema          => $schema,
         profiler        => $profiler,
         klass           => $caller,
@@ -67,16 +68,29 @@ sub import {
         *{"$caller\::_attributes"} = sub { ref $_[0] ? $_[0] : $_attributes };
         *{"$caller\::attribute"} = sub { Carp::carp("attribute has been deprecated."); $_[0]->_attributes };
     }
+    $caller->_setup_dbd;
 
-    eval "use $schema"; ## no critic
-    if ( $@ ) {
-        # accept schema class declaration within base class.
-        (my $schema_file = $schema) =~ s|::|/|g;
-        die $@ if $@ && $@ !~ /Can't locate $schema_file\.pm in \@INC/;
-    }
+    _load_class($schema);
 
     strict->import;
     warnings->import;
+}
+
+sub _load_class {
+    my $klass = shift;
+
+    return $klass if Class::Load::is_class_loaded($klass);
+
+    eval "use $klass"; ## no critic
+    if ($@) {
+        (my $file = $klass) =~ s|::|/|g;
+        if ($@ !~ /Can't locate $file\.pm in \@INC/) {
+            die $@;
+        }
+        return;
+    } else {
+        return $klass;
+    }
 }
 
 sub new {
@@ -96,7 +110,6 @@ sub new {
     for my $key ( keys %unstorable_attribute ) {
         $attr->{$key} = $unstorable_attribute{$key};
     }
-
 
     if ($connection_info) {
 
@@ -130,13 +143,13 @@ sub schema {
     my $attribute = $_[0]->_attributes;
     my $schema = $attribute->{schema};
     if ( $attribute->{check_schema} && !$schema_checked ) {
-        do {
-            no strict 'refs';
+        {
+            no strict 'refs'; ## no critic..
             unless ( defined *{"@{[ $schema ]}::schema_info"} ) {
                 die "Cannot use schema $schema ( is it really loaded? )";
             }
         };
-        $schema_checked++;
+        $schema_checked=1;
     }
     return $schema;
 }
@@ -158,54 +171,24 @@ sub suppress_row_objects {
 
 #--------------------------------------------------------------------------------
 # for transaction
-sub txn_scope {
-    DBIx::Skinny::Transaction->new( @_ );
-}
 
-sub txn_begin {
+sub txn_manager  {
     my $class = shift;
-    return if ( ++$class->_attributes->{active_transaction} > 1 );
-    $class->profiler("BEGIN WORK");
-    $class->dbh->begin_work;
+
+    $class->_attributes->{txn_manager} ||= do {
+        my $dbh = $class->dbh;
+        unless ($dbh) {
+            Carp::croak("dbh is not found.");
+        }
+        DBIx::TransactionManager->new($dbh);
+    };
 }
 
-sub txn_rollback {
-    my $class = shift;
-    return unless $class->_attributes->{active_transaction};
-
-    if ( $class->_attributes->{active_transaction} == 1 ) {
-        $class->profiler("ROLLBACK WORK");
-        $class->dbh->rollback;
-        $class->txn_end;
-    }
-    elsif ( $class->_attributes->{active_transaction} > 1 ) {
-        $class->_attributes->{active_transaction}--;
-        $class->_attributes->{rollbacked_in_nested_transaction}++;
-    }
-
-}
-
-sub txn_commit {
-    my $class = shift;
-    return unless $class->_attributes->{active_transaction};
-
-    if ( $class->_attributes->{rollbacked_in_nested_transaction} ) {
-        Carp::croak "tried to commit but already rollbacked in nested transaction.";
-    }
-    elsif ( $class->_attributes->{active_transaction} > 1 ) {
-        $class->_attributes->{active_transaction}--;
-        return;
-    }
-
-    $class->profiler("COMMIT WORK");
-    $class->dbh->commit;
-    $class->txn_end;
-}
-
-sub txn_end {
-    $_[0]->_attributes->{active_transaction} = 0;
-    $_[0]->_attributes->{rollbacked_in_nested_transaction} = 0;
-}
+sub txn_scope    { $_[0]->txn_manager->txn_scope    }
+sub txn_begin    { $_[0]->txn_manager->txn_begin    }
+sub txn_rollback { $_[0]->txn_manager->txn_rollback }
+sub txn_commit   { $_[0]->txn_manager->txn_commit   }
+sub txn_end      { $_[0]->txn_manager->txn_end      }
 
 #--------------------------------------------------------------------------------
 # db handling
@@ -220,7 +203,7 @@ sub connect_info {
         $attr->{password} = $connect_info->{password};
         $attr->{connect_options} = $connect_info->{connect_options};
 
-        $class->setup_dbd($connect_info);
+        $class->_setup_dbd($connect_info);
         return;
     } else {
         return +{
@@ -232,16 +215,15 @@ sub connect_info {
     }
 }
 
-
 sub connect {
     my $class = shift;
 
     $class->connect_info(@_) if scalar @_ >= 1;
 
     my $attr = $class->_attributes;
-    my $do_connected;
+    my $do_connected=0;
     if ( !$attr->{dbh} ) {
-        $do_connected++;
+        $do_connected=1;
     }
     $attr->{dbh} ||= DBI->connect(
         $attr->{dsn},
@@ -286,19 +268,30 @@ sub disconnect {
 sub set_dbh {
     my ($class, $dbh) = @_;
     $class->_attributes->{dbh} = $dbh;
-    $class->setup_dbd({dbh => $dbh});
+    $class->_setup_dbd({dbh => $dbh});
 }
 
-sub setup_dbd {
+sub _setup_dbd {
     my ($class, $args) = @_;
-    my $dbd_type = _dbd_type($args);
-    $class->_attributes->{dbd} = DBIx::Skinny::DBD->new($dbd_type);
+    my $driver_name = $args ? _guess_driver_name($args) : $class->_attributes->{driver_name};
+    $class->_attributes->{driver_name} = $driver_name;
+    $class->_attributes->{dbd} = $driver_name ? DBIx::Skinny::DBD->new($driver_name) : undef;
+}
+
+sub _guess_driver_name {
+    my $args = shift;
+    if ($args->{dbh}) {
+        return $args->{dbh}->{Driver}->{Name};
+    } elsif ($args->{dsn}) {
+        my (undef, $driver_name,) = DBI->parse_dsn($args->{dsn}) or Carp::croak "can't parse DSN: @{[ $args->{dsn} ]}";
+        return $driver_name
+    }
 }
 
 sub dbd {
     $_[0]->_attributes->{dbd} or do {
         require Data::Dumper;
-        Carp::croak("attribute dbd does not exist. does it connected? attribute: @{[ Data::Dumper::Dumper($_[0]->_attributes) ]}");
+        Carp::croak("Attribute 'dbd' is not defined. Either we failed to connect, or the connection has gone away. Current attribute dump: @{[ Data::Dumper::Dumper($_[0]->_attributes) ]}");
     };
 }
 
@@ -315,17 +308,6 @@ sub dbh {
         $dbh = $class->reconnect;
     }
     $dbh;
-}
-
-sub _dbd_type {
-    my $args = shift;
-    my $dbd_type;
-    if ($args->{dbh}) {
-        $dbd_type = $args->{dbh}->{Driver}->{Name};
-    } elsif ($args->{dsn}) {
-        (undef, $dbd_type,) = DBI->parse_dsn($args->{dsn}) or Carp::croak "can't parse DSN: @{[ $args->{dsn} ]}";
-    }
-    return $dbd_type;
 }
 
 #--------------------------------------------------------------------------------
@@ -365,28 +347,26 @@ sub count {
 sub resultset {
     my ($class, $args) = @_;
     $args->{skinny} = $class;
-    my $query_builder_class = $class->dbd->query_builder_class;
-    $query_builder_class->new($args);
+    $class->dbd->query_builder_class->new($args);
 }
 
 sub search {
     my ($class, $table, $where, $opt) = @_;
 
-    my $rs = $class->search_rs($table, $where, $opt);
-    $rs->retrieve;
+    $class->search_rs($table, $where, $opt)->retrieve;
 }
 
 sub search_rs {
     my ($class, $table, $where, $opt) = @_;
 
-    my $cols = $opt->{select};
-    unless ($cols) {
+    my $cols = $opt->{select} || do {
         my $column_info = $class->schema->schema_info->{$table};
         unless ( $column_info ) {
             Carp::croak("schema_info does not exist for table '$table'");
         }
-        $cols = $column_info->{columns};
-    }
+        $column_info->{columns};
+    };
+
     my $rs = $class->resultset(
         {
             select => $cols,
@@ -431,7 +411,7 @@ sub search_rs {
 sub single {
     my ($class, $table, $where, $opt) = @_;
     $opt->{limit} = 1;
-    $class->search($table, $where, $opt)->first;
+    $class->search_rs($table, $where, $opt)->retrieve->first;
 }
 
 sub search_named {
@@ -464,17 +444,15 @@ sub search_by_sql {
 
 sub find_or_new {
     my ($class, $table, $args) = @_;
-    my $row = $class->single($table, $args);
-    unless ($row) {
-        $row = $class->hash_to_row($table, $args);
-    }
-    return $row;
+    $class->single($table, $args) or do {
+        $class->hash_to_row($table, $args);
+    };
 }
 
 sub hash_to_row {
     my ($class, $table, $hash) = @_;
 
-    my $row_class = $class->_mk_row_class($table.$hash, $table);
+    my $row_class = $class->_mk_row_class($table, $table);
     my $row = $row_class->new(
         {
             sql            => undef,
@@ -506,7 +484,7 @@ sub data2itr {
     return DBIx::Skinny::Iterator->new(
         skinny         => $class,
         data           => $data,
-        row_class      => $class->_mk_row_class($table.$data, $table),
+        row_class      => $class->_mk_row_class($table, $table),
         opt_table_info => $table,
         suppress_objects => $class->suppress_row_objects,
     );
@@ -533,14 +511,8 @@ sub _mk_row_class {
     } elsif ($table) {
         my $row_class = $class->schema->schema_info->{$table}->{row_class} ||
                         join '::', $attr->{klass}, 'Row', _camelize($table);
-        eval "use $row_class"; ## no critic
-        (my $rc = $row_class) =~ s|::|/|g;
-        die $@ if $@ && $@ !~ /Can't locate $rc\.pm in \@INC/;
 
-        if ($@) {
-            $row_class = $class->_mk_common_row;
-        }
-        return $attr->{row_class_map}->{$table} = $row_class;
+        return $attr->{row_class_map}->{$table} = _load_class($row_class) || $class->_mk_common_row;
     } else {
         return $class->_mk_common_row;
     }
@@ -550,10 +522,9 @@ sub _mk_common_row {
     my $class = shift;
 
     my $row_class = join '::', $class->_attributes->{klass}, 'Row';
-    eval "use $row_class"; ## no critic
-    (my $rc = $row_class) =~ s|::|/|g;
-    die $@ if $@ && $@ !~ /Can't locate $rc\.pm in \@INC/;
-    if ($@) { no strict 'refs'; @{"$row_class\::ISA"} = ('DBIx::Skinny::Row') };
+    _load_class($row_class) or do {
+        no strict 'refs'; @{"$row_class\::ISA"} = ('DBIx::Skinny::Row');
+    };
     $row_class;
 }
 
@@ -638,7 +609,7 @@ sub _insert_or_replace {
     my $id =
         defined $pk && defined $args->{$pk} ? $args->{$pk} :
         defined $pk && (ref $pk) eq 'ARRAY' ? undef        :
-            $class->dbd->last_insert_id($class->dbh, $sth, { table => $table })
+            $class->_last_insert_id($table)
     ;
 
     $class->_close_sth($sth);
@@ -660,6 +631,24 @@ sub _insert_or_replace {
     $obj->setup;
 
     $obj;
+}
+
+sub _last_insert_id {
+    my ($class, $table) = @_;
+
+    my $dbh = $class->dbh;
+    my $driver = $class->_attributes->{driver_name};
+    if ( $driver eq 'mysql' ) {
+        return $dbh->{mysql_insertid};
+    } elsif ( $driver eq 'Pg' ) {
+        return $dbh->last_insert_id( undef, undef, undef, undef,{ sequence => join( '_', $table, 'id', 'seq' ) } );
+    } elsif ( $driver eq 'SQLite' ) {
+        return $dbh->func('last_insert_rowid');
+    } elsif ( $driver eq 'Oracle' ) {
+        return;
+    } else {
+        Carp::croak "Don't know how to get last insert id for $driver";
+    }
 }
 
 *create = \*insert;
@@ -877,19 +866,20 @@ See DBIx::Skinny::Schema for docs on defining schema class.
     };
     1;
     
-in your execute script.
+in your script.
 
     use Your::Model;
     
+    my $skinny = Your::Model->new;
     # insert new record.
-    my $row = Your::Model->insert('user',
+    my $row = $skinny->insert('user',
         {
             id   => 1,
         }
     );
     $row->update({name => 'nekokak'});
 
-    $row = Your::Model->search_by_sql(q{SELECT id, name FROM user WHERE id = ?}, [ 1 ]);
+    $row = $skinny->search_by_sql(q{SELECT id, name FROM user WHERE id = ?}, [ 1 ]);
     $row->delete('user');
 
 =head1 DESCRIPTION
@@ -972,6 +962,13 @@ or
         username => $username,
         password => $password,
         connect_options => $connect_options,
+    });
+
+or
+
+    my $dbh = DBI->connect();
+    my $db = Your::Model->new(+{
+        dbh => $dbh,
     });
 
 =item $skinny->insert($table_name, \%row_data)
@@ -1109,6 +1106,31 @@ example:
         id   => 1,
         name => 'nekokak',
     });
+
+NOTICE: find_or_create has bug.
+
+reproduction example:
+
+    my $row = Your::Model->find_or_create('user',{
+        id   => 1,
+        name => undef,
+    });
+
+In this case, it becomes an error by insert.
+
+If you want to do the same thing in this case,
+
+    my $row = Your::Model->single('user', {
+        id   => 1,
+        name => \'IS NULL',
+    })
+    unless ($row) {
+        Your::Model->insert('user', {
+            id => 1,
+        });
+    }
+
+Because the interchangeable rear side is lost, it doesn't mend. 
 
 =item $skinny->find_or_insert($table, \%values)
 
