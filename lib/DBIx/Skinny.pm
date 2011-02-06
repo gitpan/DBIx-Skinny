@@ -2,16 +2,16 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0732';
+our $VERSION = '0.0733';
 
 use DBI;
 use DBIx::Skinny::Iterator;
 use DBIx::Skinny::DBD;
 use DBIx::Skinny::Row;
+use DBIx::Skinny::Util;
 use DBIx::TransactionManager 1.02;
 use Carp ();
 use Storable ();
-use Class::Load ();
 
 sub import {
     my ($class, %opt) = @_;
@@ -56,8 +56,7 @@ sub import {
         schema          => $schema,
         profiler        => $profiler,
         klass           => $caller,
-        row_class_map   => +{},
-        active_transaction => 0,
+        _common_row_class    => '',
         suppress_row_objects => 0,
         last_pid => $$,
     };
@@ -70,68 +69,40 @@ sub import {
     }
     $caller->_setup_dbd;
 
-    _load_class($schema);
+    DBIx::Skinny::Util::load_class($schema);
 
     strict->import;
     warnings->import;
-}
-
-sub _load_class {
-    my $klass = shift;
-
-    return $klass if Class::Load::is_class_loaded($klass);
-
-    eval "use $klass"; ## no critic
-    if ($@) {
-        (my $file = $klass) =~ s|::|/|g;
-        if ($@ !~ /Can't locate $file\.pm in \@INC/) {
-            die $@;
-        }
-        return;
-    } else {
-        return $klass;
-    }
 }
 
 sub new {
     my ($class, $connection_info) = @_;
     my $attr = $class->_attributes;
 
-    $attr->{last_pid} = $$;
-
-    my %unstorable_attribute;
-    for my $key ( qw/dbd profiler dbh connect_options on_connect_do / ) {
-        $unstorable_attribute{$key} = delete $attr->{$key};
+    my $new_attr;
+    for my $key (qw/check_schema dsn username password connect_options driver_name schema profiler klass _common_row_class suppress_row_objects/) {
+        $new_attr->{$key} = $attr->{$key};
     }
 
-    my $self = bless Storable::dclone($attr), $class;
+    my $self = bless $new_attr, $class;
+    $new_attr = $self->_attributes;
+    $new_attr->{last_pid} = $$;
 
     # restore.
-    for my $key ( keys %unstorable_attribute ) {
-        $attr->{$key} = $unstorable_attribute{$key};
+    for my $key (qw/dbd profiler dbh connect_options on_connect_do/) {
+        $new_attr->{$key} = $attr->{$key};
     }
 
     if ($connection_info) {
-
-        $self->_attributes->{profiler} = $unstorable_attribute{profiler};
-
         if ( $connection_info->{on_connect_do} ) {
-            $self->_attributes->{on_connect_do} = $connection_info->{on_connect_do};
-        } else {
-            $self->_attributes->{on_connect_do} = $unstorable_attribute{on_connect_do};
+            $new_attr->{on_connect_do} = $connection_info->{on_connect_do};
         }
 
+        $self->connect_info($connection_info);
         if ($connection_info->{dbh}) {
-            $self->connect_info($connection_info);
             $self->set_dbh($connection_info->{dbh});
         } else {
-            $self->connect_info($connection_info);
             $self->reconnect;
-        }
-
-    } else {
-        for my $key ( keys %unstorable_attribute ) {
-            $self->_attributes->{$key} = $unstorable_attribute{$key};
         }
     }
 
@@ -184,7 +155,15 @@ sub txn_manager  {
     };
 }
 
-sub txn_scope    { $_[0]->txn_manager->txn_scope    }
+sub in_transaction {
+    my $class = shift;
+    $class->_attributes->{txn_manager} ? $class->_attributes->{txn_manager}->in_transaction : undef;
+}
+
+sub txn_scope {
+    my @caller = caller();
+    $_[0]->txn_manager->txn_scope(caller => \@caller);
+}
 sub txn_begin    { $_[0]->txn_manager->txn_begin    }
 sub txn_rollback { $_[0]->txn_manager->txn_rollback }
 sub txn_commit   { $_[0]->txn_manager->txn_commit   }
@@ -241,6 +220,11 @@ sub connect {
 
 sub reconnect {
     my $class = shift;
+
+    if ($class->in_transaction) {
+        Carp::confess("Detected disconnected database during a transaction. Refusing to proceed at");
+    }
+
     $class->disconnect();
     $class->connect(@_);
 }
@@ -332,6 +316,7 @@ sub do {
 sub count {
     my ($class, $table, $column, $where) = @_;
 
+    $column ||= '*';
     my $rs = $class->resultset(
         {
             from   => [$table],
@@ -339,7 +324,9 @@ sub count {
     );
 
     $rs->add_select("COUNT($column)" =>  'cnt');
-    $class->_add_where($rs, $where);
+    if ($where) {
+        $class->_add_where($rs, $where);
+    }
 
     $rs->retrieve->first->cnt;
 }
@@ -452,7 +439,7 @@ sub find_or_new {
 sub hash_to_row {
     my ($class, $table, $hash) = @_;
 
-    my $row_class = $class->_mk_row_class($table, $table);
+    my $row_class = $class->_get_row_class($table, $table);
     my $row = $row_class->new(
         {
             sql            => undef,
@@ -472,7 +459,7 @@ sub _get_sth_iterator {
         skinny         => $class,
         sth            => $sth,
         sql            => $sql,
-        row_class      => $class->_mk_row_class($sql, $opt_table_info),
+        row_class      => $class->_get_row_class($sql, $opt_table_info),
         opt_table_info => $opt_table_info,
         suppress_objects => $class->suppress_row_objects,
     );
@@ -484,7 +471,7 @@ sub data2itr {
     return DBIx::Skinny::Iterator->new(
         skinny         => $class,
         data           => $data,
-        row_class      => $class->_mk_row_class($table, $table),
+        row_class      => $class->_get_row_class($table, $table),
         opt_table_info => $table,
         suppress_objects => $class->suppress_row_objects,
     );
@@ -499,38 +486,21 @@ sub _guess_table_name {
     return;
 }
 
-sub _mk_row_class {
+sub _get_row_class {
     my ($class, $sql, $table) = @_;
 
     $table ||= $class->_guess_table_name($sql)||'';
-    my $attr = $class->_attributes;
-    my $base_row_class = $attr->{row_class_map}->{$table}||'';
-
-    if ($base_row_class) {
-        return $base_row_class;
-    } elsif ($table) {
-        my $row_class = $class->schema->schema_info->{$table}->{row_class} ||
-                        join '::', $attr->{klass}, 'Row', _camelize($table);
-
-        return $attr->{row_class_map}->{$table} = _load_class($row_class) || $class->_mk_common_row;
+    if ($table) {
+        return $class->schema->schema_info->{$table}->{row_class};
     } else {
-        return $class->_mk_common_row;
+        return $class->_attributes->{_common_row_class} ||= do {
+            my $row_class = join '::', $class->_attributes->{klass}, 'Row';
+            DBIx::Skinny::Util::load_class($row_class) or do {
+                no strict 'refs'; @{"$row_class\::ISA"} = ('DBIx::Skinny::Row');
+            };
+            $row_class;
+        };
     }
-}
-
-sub _mk_common_row {
-    my $class = shift;
-
-    my $row_class = join '::', $class->_attributes->{klass}, 'Row';
-    _load_class($row_class) or do {
-        no strict 'refs'; @{"$row_class\::ISA"} = ('DBIx::Skinny::Row');
-    };
-    $row_class;
-}
-
-sub _camelize {
-    my $s = shift;
-    join('', map{ ucfirst $_ } split(/(?<=[A-Za-z])_(?=[A-Za-z])|\b/, $s));
 }
 
 sub _quote {
@@ -604,21 +574,15 @@ sub _insert_or_replace {
             'VALUES (' . join(', ', @$columns) . ')' . "\n";
 
     my $sth = $class->_execute($sql, $bind_columns, $table);
-
-    my $pk = $class->schema->schema_info->{$table}->{pk};
-    my $id =
-        defined $pk && defined $args->{$pk} ? $args->{$pk} :
-        defined $pk && (ref $pk) eq 'ARRAY' ? undef        :
-            $class->_last_insert_id($table)
-    ;
-
     $class->_close_sth($sth);
 
-    if ($id) {
-        $args->{$pk} = $id;
+    my $pk = $class->schema->schema_info->{$table}->{pk};
+
+    if (not ref $pk && not defined $args->{$pk}) {
+        $args->{$pk} = $class->_last_insert_id($table);
     }
 
-    my $row_class = $class->_mk_row_class($sql, $table);
+    my $row_class = $class->_get_row_class($sql, $table);
     return $args if $class->suppress_row_objects;
 
     my $obj = $row_class->new(
@@ -759,17 +723,7 @@ sub find_or_create {
     my ($class, $table, $args) = @_;
     my $row = $class->single($table, $args);
     return $row if $row;
-    $row = $class->insert($table, $args);
-    my $pk = $class->schema->schema_info->{$table}->{pk};
-    my %args;
-    if (ref $pk) {
-        for (@$pk) {
-            $args{$_} = $row->get_column($_);
-        }
-    } else {
-        $args{$pk} = $class->suppress_row_objects ? $row->{$pk} :$row->get_column($pk);
-    }
-    $class->single($table, \%args);
+    $class->insert($table, $args)->refetch;
 }
 
 sub _add_where {
@@ -787,7 +741,7 @@ sub _execute {
         $bind = [map {(ref $_->[1]) eq 'ARRAY' ? @{$_->[1]} : $_->[1]} @$args];
         $class->profiler($stmt, $bind);
         eval {
-            $sth = $class->dbh->prepare($stmt);
+            $sth = $class->dbh->prepare($stmt) or die $class->dbh->errstr;
             $class->bind_params($table, $args, $sth);
             $sth->execute;
         };
@@ -795,7 +749,7 @@ sub _execute {
         $bind = $args;
         $class->profiler($stmt, $bind);
         eval {
-            $sth = $class->dbh->prepare($stmt);
+            $sth = $class->dbh->prepare($stmt) or die $class->dbh->errstr;
             $sth->execute(@{$args});
         };
     }
@@ -975,12 +929,15 @@ or
 
 insert new record and get inserted row object.
 
+if insert to table has auto increment then return $row object with fill in key column by last_insert_id.
+
 example:
 
     my $row = Your::Model->insert('user',{
         id   => 1,
         name => 'nekokak',
     });
+    say $row->id; # show last_insert_id()
 
 or
 

@@ -27,7 +27,7 @@ requires:
   Class::Accessor::Lite: 0
   Class::Load: 0
   DBI: 0
-  DBIx::TransactionManager: 1.02
+  DBIx::TransactionManager: 1.06
   IO::Handle: 0
   Scalar::Util: 0
   Try::Tiny: 0
@@ -35,4 +35,4 @@ requires:
 resources:
   license: http://dev.perl.org/licenses/
   repository: git://github.com/nekokak/p5-dbix-skinny.git
-version: 0.0732
+version: 0.0733
