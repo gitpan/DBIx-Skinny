@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0734';
+our $VERSION = '0.0735';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -578,12 +578,16 @@ sub _insert_or_replace {
 
     my $pk = $class->schema->schema_info->{$table}->{pk};
 
-    if (not(ref $pk) && not(defined $args->{$pk})) {
+    if (defined $pk && not(ref $pk) && not(defined $args->{$pk})) {
         $args->{$pk} = $class->_last_insert_id($table);
     }
 
-    my $row_class = $class->_get_row_class($sql, $table);
     return $args if $class->suppress_row_objects;
+
+    my $row_class = $class->_get_row_class($sql, $table);
+    if (! $row_class) {
+        Carp::croak( "Could not find row definition for table '$table' (did you make sure to install_table()?)" );
+    }
 
     my $obj = $row_class->new(
         {
