@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0733';
+our $VERSION = '0.0734';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -490,7 +490,7 @@ sub _get_row_class {
     my ($class, $sql, $table) = @_;
 
     $table ||= $class->_guess_table_name($sql)||'';
-    if ($table) {
+    if ($table && $class->schema->schema_info->{$table}) {
         return $class->schema->schema_info->{$table}->{row_class};
     } else {
         return $class->_attributes->{_common_row_class} ||= do {
@@ -578,7 +578,7 @@ sub _insert_or_replace {
 
     my $pk = $class->schema->schema_info->{$table}->{pk};
 
-    if (not ref $pk && not defined $args->{$pk}) {
+    if (not(ref $pk) && not(defined $args->{$pk})) {
         $args->{$pk} = $class->_last_insert_id($table);
     }
 
