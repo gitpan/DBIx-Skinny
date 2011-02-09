@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0735';
+our $VERSION = '0.0736';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -146,6 +146,8 @@ sub suppress_row_objects {
 sub txn_manager  {
     my $class = shift;
 
+    $class->_verify_pid;
+
     $class->_attributes->{txn_manager} ||= do {
         my $dbh = $class->dbh;
         unless ($dbh) {
@@ -155,9 +157,14 @@ sub txn_manager  {
     };
 }
 
-sub in_transaction {
+sub in_transaction_check {
     my $class = shift;
-    $class->_attributes->{txn_manager} ? $class->_attributes->{txn_manager}->in_transaction : undef;
+
+    return unless $class->_attributes->{txn_manager};
+
+    if ($class->_attributes->{txn_manager}->in_transaction) {
+        Carp::confess("Detected disconnected database during a transaction. Refusing to proceed at");
+    }
 }
 
 sub txn_scope {
@@ -221,9 +228,7 @@ sub connect {
 sub reconnect {
     my $class = shift;
 
-    if ($class->in_transaction) {
-        Carp::confess("Detected disconnected database during a transaction. Refusing to proceed at");
-    }
+    $class->in_transaction_check;
 
     $class->disconnect();
     $class->connect(@_);
@@ -279,19 +284,28 @@ sub dbd {
     };
 }
 
+sub _verify_pid {
+    my $class = shift;
+
+    my $attr = $class->_attributes;
+    if ( $attr->{last_pid} != $$ and my $dbh = $attr->{dbh}) {
+        $attr->{last_pid} = $$;
+        $dbh->{InactiveDestroy} = 1;
+        $class->in_transaction_check;
+        $class->disconnect;
+    }
+}
+
 sub dbh {
     my $class = shift;
 
+    $class->_verify_pid;
+
     my $dbh = $class->connect;
-    if ( $class->_attributes->{last_pid} != $$ ) {
-        $class->_attributes->{last_pid} = $$;
-        $dbh->{InactiveDestroy} = 1;
-        $dbh = $class->reconnect;
+    unless ($dbh->FETCH('Active') && $dbh->ping) {
+        $class->reconnect;
     }
-    unless ($dbh && $dbh->FETCH('Active') && $dbh->ping) {
-        $dbh = $class->reconnect;
-    }
-    $dbh;
+    $class->_attributes->{dbh};
 }
 
 #--------------------------------------------------------------------------------
@@ -1161,13 +1175,13 @@ It's useful in case use IN statement.
 
     # SELECT * FROM user WHERE id IN (?,?,?);
     # bind [1,2,3]
-    my $itr = Your::Model->search_named(q{SELECT * FROM user WHERE id IN :ids}, {id => [1, 2, 3]});
+    my $itr = Your::Model->search_named(q{SELECT * FROM user WHERE id IN :ids}, {ids => [1, 2, 3]});
 
 If you give \@sql_parts,
 
     # SELECT * FROM user WHERE id IN (?,?,?) AND unsubscribed_at IS NOT NULL;
     # bind [1,2,3]
-    my $itr = Your::Model->search_named(q{SELECT * FROM user WHERE id IN :ids %s}, {id => [1, 2, 3]}, ['AND unsubscribed_at IS NOT NULL']);
+    my $itr = Your::Model->search_named(q{SELECT * FROM user WHERE id IN :ids %s}, {ids => [1, 2, 3]}, ['AND unsubscribed_at IS NOT NULL']);
 
 If you give table_name. It is assumed the hint that makes DBIx::Skinny::Row's Object.
 
