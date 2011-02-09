@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0737';
+our $VERSION = '0.0738';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -295,6 +295,13 @@ sub _verify_pid {
         $attr->{txn_manager} = undef;
         $class->disconnect;
     }
+}
+
+sub DESTROY {
+    my $self = shift;
+    eval {
+        $self->_verify_pid;
+    };
 }
 
 sub dbh {
