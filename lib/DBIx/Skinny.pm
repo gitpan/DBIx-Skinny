@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0736';
+our $VERSION = '0.0737';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -292,6 +292,7 @@ sub _verify_pid {
         $attr->{last_pid} = $$;
         $dbh->{InactiveDestroy} = 1;
         $class->in_transaction_check;
+        $attr->{txn_manager} = undef;
         $class->disconnect;
     }
 }

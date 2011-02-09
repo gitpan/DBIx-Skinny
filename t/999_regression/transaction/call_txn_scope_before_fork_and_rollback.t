@@ -20,8 +20,9 @@ Mock::Basic->setup_test_db;
 
     if (fork) {
         wait;
-        my $row = Mock::Basic->single('mock_basic',{name => 'ruby'});
-        is $row->id, 2;
+        my $row = Mock::Basic->single('mock_basic',{name => 'lestrrat'});
+        ok not $row;
+
         is $dbh, +Mock::Basic->dbh;
         is $txn_manager, +Mock::Basic->txn_manager;
 
@@ -40,7 +41,7 @@ Mock::Basic->setup_test_db;
             isa_ok $row, 'DBIx::Skinny::Row';
             is $row->name, 'ruby';
 
-        $txn->commit;
+        $txn->rollback;
     }
 
 unlink $db;
