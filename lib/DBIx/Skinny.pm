@@ -2,14 +2,14 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0738';
+our $VERSION = '0.0739';
 
 use DBI;
 use DBIx::Skinny::Iterator;
 use DBIx::Skinny::DBD;
 use DBIx::Skinny::Row;
 use DBIx::Skinny::Util;
-use DBIx::TransactionManager 1.02;
+use DBIx::TransactionManager 1.07;
 use Carp ();
 use Storable ();
 
@@ -162,9 +162,7 @@ sub in_transaction_check {
 
     return unless $class->_attributes->{txn_manager};
 
-    if ($class->_attributes->{txn_manager}->in_transaction) {
-        Carp::confess("Detected disconnected database during a transaction. Refusing to proceed at");
-    }
+    return $class->_attributes->{txn_manager}->in_transaction;
 }
 
 sub txn_scope {
@@ -228,7 +226,11 @@ sub connect {
 sub reconnect {
     my $class = shift;
 
-    $class->in_transaction_check;
+    if ( my $info = $class->in_transaction_check ) {
+        my $caller = $info->{caller};
+        my $pid    = $info->{pid};
+        Carp::confess("Detected transaction during a reconnect operation (last known transaction at $caller->[1] line $caller->[2], pid $pid). Refusing to proceed at");
+    }
 
     $class->disconnect();
     $class->connect(@_);
@@ -291,7 +293,11 @@ sub _verify_pid {
     if ( $attr->{last_pid} != $$ and my $dbh = $attr->{dbh}) {
         $attr->{last_pid} = $$;
         $dbh->{InactiveDestroy} = 1;
-        $class->in_transaction_check;
+        if ( my $info = $class->in_transaction_check ) {
+            my $pid    = $info->{pid};
+            my $caller = $info->{caller};
+            Carp::confess("Detected transaction while processing forked child (last known transaction at $caller->[1] line $caller->[2], pid $pid). Refusing to proceed at");
+        }
         $attr->{txn_manager} = undef;
         $class->disconnect;
     }
