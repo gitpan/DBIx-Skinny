@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0739';
+our $VERSION = '0.0740';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -305,9 +305,7 @@ sub _verify_pid {
 
 sub DESTROY {
     my $self = shift;
-    eval {
-        $self->_verify_pid;
-    };
+    $self->_verify_pid;
 }
 
 sub dbh {
