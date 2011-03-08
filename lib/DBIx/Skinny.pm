@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0740';
+our $VERSION = '0.0741';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -253,7 +253,10 @@ sub do_on_connect {
 
 sub disconnect {
     my $class = shift;
-    $class->_attributes->{dbh} = undef;
+    delete $class->_attributes->{txn_manager};
+    if (my $dbh = delete $class->_attributes->{dbh}) {
+        $dbh->disconnect;
+    }
 }
 
 sub set_dbh {
@@ -299,7 +302,7 @@ sub _verify_pid {
             Carp::confess("Detected transaction while processing forked child (last known transaction at $caller->[1] line $caller->[2], pid $pid). Refusing to proceed at");
         }
         $attr->{txn_manager} = undef;
-        $class->disconnect;
+        $attr->{dbh}         = undef;
     }
 }
 
