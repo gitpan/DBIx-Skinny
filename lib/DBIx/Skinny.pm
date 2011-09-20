@@ -2,7 +2,7 @@ package DBIx::Skinny;
 use strict;
 use warnings;
 
-our $VERSION = '0.0741';
+our $VERSION = '0.0742';
 
 use DBI;
 use DBIx::Skinny::Iterator;
@@ -146,15 +146,8 @@ sub suppress_row_objects {
 sub txn_manager  {
     my $class = shift;
 
-    $class->_verify_pid;
-
-    $class->_attributes->{txn_manager} ||= do {
-        my $dbh = $class->dbh;
-        unless ($dbh) {
-            Carp::croak("dbh is not found.");
-        }
-        DBIx::TransactionManager->new($dbh);
-    };
+    my $dbh = $class->dbh;
+    $class->_attributes->{txn_manager} ||= DBIx::TransactionManager->new($dbh);
 }
 
 sub in_transaction_check {
@@ -509,7 +502,7 @@ sub data2itr {
 sub _guess_table_name {
     my ($class, $sql) = @_;
 
-    if ($sql =~ /\sfrom\s+([\w]+)\s*/si) {
+    if ($sql =~ /\sfrom\s+["`]?([\w]+)["`]?\s*/si) {
         return $1;
     }
     return;
